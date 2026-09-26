@@ -15,7 +15,7 @@ from ocr_tool.document import Paragraph, Table  # noqa: E402
 from ocr_tool.export_docx import export_docx  # noqa: E402
 from ocr_tool.lang import choose_lang, to_tesseract_langs  # noqa: E402
 from ocr_tool.pipeline import Options, Pipeline  # noqa: E402
-from tests.make_sample import TABLE, make_sample  # noqa: E402
+from tests.make_sample import TABLE, find_times_fonts, make_sample  # noqa: E402
 
 TESS = find_tesseract()
 HAVE_LANGS = set(list_languages(TESS)) if TESS else set()
@@ -46,7 +46,7 @@ def pages(tmp_path_factory):
 @needs_tesseract
 def test_text_all_languages(pages):
     assert len(pages) == 1
-    text = pages[0].text
+    text = " ".join(pages[0].text.split())
     for frag in ("tiếng Việt", "bố cục", "English paragraph", "Word document",
                  "русский абзац", "таблицы"):
         assert frag in text, f"thiếu: {frag}\n{text}"
@@ -140,3 +140,39 @@ def test_merged_cells_grid():
     spans = {(c.row, c.col): (c.row_span, c.col_span) for c in g.cells}
     assert spans[(0, 1)] == (1, 2)
     assert (0, 2) not in spans and len(g.cells) == 5
+
+
+def _levenshtein(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+@needs_tesseract
+@pytest.mark.skipif(find_times_fonts() is None, reason="không có font Times New Roman / Liberation Serif")
+def test_times_font_document(tmp_path):
+    """Ảnh mẫu vẽ bằng font Times (phổ biến nhất trong văn bản tiếng Việt): kiểm tra với dung sai OCR."""
+    reg, bold = find_times_fonts()
+    img = tmp_path / "times.png"
+    make_sample(str(img), font_path=reg, bold_font_path=bold)
+    page = Pipeline(Options(tesseract_cmd=TESS)).process_file(str(img))[0]
+    text = " ".join(page.text.split())
+    for frag in ("tiếng Việt", "English paragraph", "Word document", "русский абзац"):
+        assert frag in text, f"thiếu: {frag}\n{text}"
+    paras = [e for e in page.elements if isinstance(e, Paragraph)]
+    tables = [e for e in page.elements if isinstance(e, Table)]
+    assert paras[0].alignment == "center" and paras[0].bold
+    body = paras[1]
+    assert len(body.lines) == 2, "đoạn thụt đầu dòng bị tách làm hai"
+    assert body.alignment == "left" and 0.3 <= body.first_line_indent_in <= 0.5
+    assert paras[-1].alignment == "right"
+    assert len(tables) == 1 and (tables[0].n_rows, tables[0].n_cols) == (4, 4)
+    grid = {(c.row, c.col): c.text for c in tables[0].cells}
+    for r, row in enumerate(TABLE):
+        for c, expected in enumerate(row):
+            got = grid[(r, c)]
+            assert _levenshtein(got, expected) <= 1, f"ô ({r},{c}): {got!r} != {expected!r}"

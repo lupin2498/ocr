@@ -122,11 +122,75 @@ class TesseractEngine:
         blocks = self.group_words(items)
         for b in blocks:
             b.lang = self.combined_lang
+        blocks = self.merge_split_blocks(blocks)
         if self.refine_blocks and len(self.langs) > 1:
             blocks = self._refine_blocks(gray, blocks)
         if self.refine_lines:
             self._refine_lines(gray, blocks)
+        for b in blocks:
+            b.paragraphs = self.merge_split_paragraphs(b.paragraphs)
         return blocks
+
+    @staticmethod
+    def _is_continuation(a: Line, b: Line, body_left: int, ref_right: int, lh: float) -> bool:
+        """Dòng b là phần nối tiếp (bị ngắt dòng) của dòng a?
+        Điều kiện: khoảng cách dòng bình thường, b không thụt vào so với thân đoạn,
+        a gần chạm mép phải (tức là bị ngắt dòng), cỡ chữ tương đương, cùng cột."""
+        pitch = b.bbox[1] - a.bbox[1]
+        not_indented = b.bbox[0] <= body_left + 0.3 * lh
+        wrapped = a.bbox[2] >= ref_right - 2.5 * lh
+        same_size = 0.7 <= (b.height / max(1, a.height)) <= 1.4
+        same_column = b.bbox[2] > a.bbox[0] and a.bbox[2] > b.bbox[0]
+        return 0 < pitch <= 2.0 * lh and not_indented and wrapped and same_size and same_column
+
+    @staticmethod
+    def merge_split_paragraphs(paragraphs: List[Paragraph]) -> List[Paragraph]:
+        """Tesseract hay tách "dòng đầu thụt vào" và phần còn lại thành hai đoạn; gộp lại."""
+        paragraphs = [p for p in paragraphs if not p.is_empty()]
+        if len(paragraphs) < 2:
+            return paragraphs
+        block_bbox = union_bbox([p.bbox for p in paragraphs])
+        heights = [ln.height for p in paragraphs for ln in p.lines if ln.words]
+        lh = float(np.median(heights)) if heights else 0.0
+        if lh <= 0:
+            return paragraphs
+        out: List[Paragraph] = [paragraphs[0]]
+        for nxt in paragraphs[1:]:
+            prev = out[-1]
+            body_left = min(ln.bbox[0] for ln in prev.lines)
+            if TesseractEngine._is_continuation(prev.lines[-1], nxt.lines[0], body_left, block_bbox[2], lh):
+                prev.lines.extend(nxt.lines)
+            else:
+                out.append(nxt)
+        return out
+
+    @staticmethod
+    def merge_split_blocks(blocks: List[Block]) -> List[Block]:
+        """Tesseract (psm 3) đôi khi tách một đoạn 2 dòng thành hai khối; gộp lại
+        khi dòng sau rõ ràng là phần ngắt dòng của dòng trước."""
+        blocks = [b for b in blocks if not b.is_empty()]
+        if len(blocks) < 2:
+            return blocks
+        heights = [ln.height for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
+        lh = float(np.median(heights)) if heights else 0.0
+        if lh <= 0:
+            return blocks
+        content_right = max(b.bbox[2] for b in blocks)
+        out: List[Block] = [blocks[0]]
+        for nxt in blocks[1:]:
+            prev = out[-1]
+            prev_par = prev.paragraphs[-1]
+            body_left = min(ln.bbox[0] for ln in prev_par.lines)
+            if TesseractEngine._is_continuation(prev_par.lines[-1], nxt.paragraphs[0].lines[0],
+                                                body_left, content_right, lh):
+                prev_par.lines.extend(nxt.paragraphs[0].lines)
+                prev.paragraphs.extend(nxt.paragraphs[1:])
+                new_bbox = prev.bbox
+                for p in prev.paragraphs:
+                    p.block_bbox = new_bbox
+            else:
+                out.append(nxt)
+        return out
 
     # ------------------------------------------------------------------ tinh chỉnh theo khối
     def _crop(self, gray: np.ndarray, bbox, pad: int):

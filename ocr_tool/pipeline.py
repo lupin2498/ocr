@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Callable, List, Optional, Sequence
 
+import cv2
 import numpy as np
 
 from .document import Element, Line, Page, Paragraph, Table, TableCell, Word
@@ -151,13 +152,21 @@ class Pipeline:
         # ô trống -> bỏ qua để tiết kiệm thời gian
         if (crop < 128).mean() < 0.002:
             return [], []
+        # chữ nhỏ: phóng to 2x để Tesseract nhận dấu tiếng Việt / chữ Cyrillic tốt hơn
+        scale = 2 if crop.shape[0] < 120 else 1
+        if scale > 1:
+            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         # thêm viền trắng giúp Tesseract nhận dạng tốt hơn
         pad = 10
         canvas = np.full((crop.shape[0] + 2 * pad, crop.shape[1] + 2 * pad), 255, dtype=np.uint8)
         canvas[pad:-pad, pad:-pad] = crop
         lines = self.engine.ocr_region(canvas, lang=lang, psm=6)
         texts = [ln.text for ln in lines if ln.text.strip()]
-        words = [w.shifted(l - pad, t - pad) for ln in lines for w in ln.words]
+        words = []
+        for ln in lines:
+            for w in ln.words:
+                words.append(Word(w.text, l + (w.left - pad) // scale, t + (w.top - pad) // scale,
+                                  w.width // scale, w.height // scale, w.conf))
         return texts, words
 
     @staticmethod

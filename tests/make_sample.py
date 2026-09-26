@@ -6,17 +6,26 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+FONT_DIR = Path(__file__).resolve().parent / "fonts"
+# Font đóng gói kèm để ảnh mẫu giống nhau trên mọi hệ điều hành
 FONT_CANDIDATES = [
+    str(FONT_DIR / "DejaVuSerif.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     r"C:\Windows\Fonts\times.ttf",
-    r"C:\Windows\Fonts\arial.ttf",
 ]
 BOLD_CANDIDATES = [
+    str(FONT_DIR / "DejaVuSerif-Bold.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     r"C:\Windows\Fonts\timesbd.ttf",
-    r"C:\Windows\Fonts\arialbd.ttf",
+]
+# Font Times New Roman (Windows) hoặc Liberation Serif (Linux, cùng số đo) để thử font phổ biến thật
+TIMES_CANDIDATES = [
+    r"C:\Windows\Fonts\times.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+]
+TIMES_BOLD_CANDIDATES = [
+    r"C:\Windows\Fonts\timesbd.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
 ]
 
 TITLE = "BÁO CÁO TỔNG HỢP KẾT QUẢ"
@@ -55,12 +64,20 @@ def wrap(draw, text, font, max_w):
     return lines
 
 
-def make_sample(out_path: str, dpi: int = 300) -> str:
+def find_times_fonts():
+    """Trả về (font thường, font đậm) kiểu Times nếu có trên máy, ngược lại None."""
+    reg = next((c for c in TIMES_CANDIDATES if Path(c).exists()), None)
+    bold = next((c for c in TIMES_BOLD_CANDIDATES if Path(c).exists()), None)
+    return (reg, bold) if reg and bold else None
+
+
+def make_sample(out_path: str, dpi: int = 300, font_path: str | None = None,
+                bold_font_path: str | None = None) -> str:
     W, H = int(8.27 * dpi), int(11.69 * dpi)
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
-    body = _font(FONT_CANDIDATES, 42)
-    bold = _font(BOLD_CANDIDATES, 64)
+    body = _font([font_path] if font_path else FONT_CANDIDATES, 42)
+    bold = _font([bold_font_path] if bold_font_path else BOLD_CANDIDATES, 64)
     margin = int(1.0 * dpi)
     max_w = W - 2 * margin
     y = margin
