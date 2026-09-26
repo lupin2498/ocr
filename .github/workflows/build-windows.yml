@@ -78,24 +78,15 @@ jobs:
           Get-ChildItem build\tesseract\tessdata
           & build\tesseract\tesseract.exe --list-langs
 
-      - name: Chẩn đoán chất lượng OCR theo phiên bản Tesseract (tham khảo)
+      - name: Chẩn đoán chất lượng OCR (tham khảo)
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          TESSERACT_CMD: ${{ github.workspace }}\build\tesseract\tesseract.exe
         run: |
-          $env:TESSERACT_CMD = "${{ github.workspace }}\build\tesseract\tesseract.exe"
           python tools\diag_sample.py
-          foreach ($v in @("5.5.0.20241111", "5.4.0.20240606")) {
-            $dir = "build\diag\$v"
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            try {
-              Invoke-WebRequest -Uri "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-$v.exe" -OutFile "build\diag\$v.exe"
-              7z x "build\diag\$v.exe" "-o$dir" -y | Out-Null
-              foreach ($l in @("vie", "eng", "rus", "osd")) { Copy-Item "build\tesseract\tessdata\$l.traineddata" "$dir\tessdata\" -Force }
-              $env:TESSERACT_CMD = "${{ github.workspace }}\$dir\tesseract.exe"
-              python tools\diag_sample.py
-            } catch { Write-Host "Bỏ qua $v : $_" }
-          }
+          python tools\diag_detail.py
+          $env:OMP_THREAD_LIMIT = "1"
+          python tools\diag_detail.py
 
       - name: Kiểm thử trên Windows
         env:
