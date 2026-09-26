@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
 from . import __version__
-from .config import find_tesseract, list_languages, tessdata_dir_for
+from .config import app_dir, find_tesseract, list_languages, tessdata_dir_for
 from .export_docx import export_docx
 from .lang import LANG_MAP, LANG_NAMES
 from .pipeline import Options, Pipeline
@@ -37,9 +37,23 @@ class App(tk.Tk):
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_outputs: List[str] = []
+        self._set_icon()
         self._build()
         self.after(100, self._poll)
         self._detect_tesseract()
+
+    def _set_icon(self) -> None:
+        base = Path(getattr(sys, "_MEIPASS", app_dir()))
+        for cand in (base / "assets" / "icon.ico", app_dir() / "assets" / "icon.ico"):
+            if cand.is_file():
+                try:
+                    if os.name == "nt":
+                        self.iconbitmap(str(cand))
+                    else:
+                        self.iconphoto(True, tk.PhotoImage(file=str(cand.with_suffix(".png"))))
+                except tk.TclError:
+                    pass
+                break
 
     # ------------------------------------------------------------------ UI
     def _build(self) -> None:
@@ -289,8 +303,27 @@ class App(tk.Tk):
         self.open_btn.config(state="normal" if self._last_outputs else "disabled")
 
 
+def _log_file() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "OCR2Word"
+    else:
+        base = Path.home() / ".ocr2word"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "ocr2word.log"
+
+
 def run_gui() -> None:
-    logging.basicConfig(level=logging.INFO)
+    handlers: list = []
+    try:
+        from logging.handlers import RotatingFileHandler
+        handlers.append(RotatingFileHandler(_log_file(), maxBytes=1_000_000, backupCount=2, encoding="utf-8"))
+    except OSError:
+        pass
+    if sys.stderr is not None:  # bản .exe không console: sys.stderr = None
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO, handlers=handlers,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("PIL").setLevel(logging.WARNING)
     app = App()
     app.mainloop()
 

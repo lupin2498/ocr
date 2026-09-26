@@ -16,6 +16,27 @@ thụt đầu dòng, tiêu đề in đậm) và **bảng biểu** (kể cả ô 
 
 ## 1. Cài đặt trên Windows
 
+### Cách 1 – Bộ cài sẵn (khuyên dùng, không cần Python)
+
+Vào trang **Releases** của kho mã: `https://github.com/luoin2489/desktop-tutorial/releases`
+
+| File | Dùng khi |
+|---|---|
+| `OCR2Word-<phiên bản>-Setup-win64.exe` | **Bộ cài** cho Windows 10/11 64-bit. Chạy, Next, xong. Đã kèm Tesseract-OCR và dữ liệu `vie / eng / rus`. |
+| `OCR2Word-<phiên bản>-portable-win64.zip` | **Bản portable**: giải nén ra thư mục bất kỳ (USB cũng được), mở `OCR2Word.exe`. |
+
+Sau khi cài có 2 chương trình trong thư mục cài đặt:
+
+* `OCR2Word.exe` – giao diện đồ hoạ (có shortcut ở Desktop / Start Menu).
+* `ocr2word-cli.exe` – bản dòng lệnh, ví dụ `ocr2word-cli.exe anh.jpg -o ket_qua`.
+
+Bộ cài được tạo tự động bởi GitHub Actions (`.github/workflows/build-windows.yml`) trên máy Windows:
+PyInstaller đóng gói chương trình, tải Tesseract-OCR bản Windows của UB Mannheim + dữ liệu `tessdata_best`,
+chạy kiểm thử, rồi Inno Setup tạo file Setup. Nếu Windows SmartScreen cảnh báo (file chưa ký số),
+chọn **More info → Run anyway**.
+
+### Cách 2 – Chạy từ mã nguồn
+
 1. Cài **Python 3.10+**: <https://www.python.org/downloads/windows/> (tick *Add python.exe to PATH*).
 2. Cài **Tesseract-OCR** bản Windows: <https://github.com/UB-Mannheim/tesseract/wiki>
    – ở bước *Additional language data* tick **Vietnamese**, **Russian** (English có sẵn).
@@ -58,9 +79,11 @@ ocr2word.bat --check
 | `--txt` | xuất thêm file `.txt` |
 | `--check` | kiểm tra Tesseract và dữ liệu ngôn ngữ |
 
-### Đóng gói thành `.exe`
-Chạy `build_exe.bat` → `dist\OCR2Word.exe`. Máy đích vẫn cần Tesseract-OCR (cài đặt hoặc chép thư mục
-`tesseract\` chứa `tesseract.exe` + `tessdata\` đặt cạnh file exe).
+### Tự đóng gói thành `.exe` / bộ cài
+* Trên Windows: chạy `build_exe.bat` → `dist\OCR2Word\` (OCR2Word.exe + ocr2word-cli.exe, kèm Tesseract nếu máy đã cài);
+  nếu có Inno Setup 6 sẽ tạo thêm `dist\installer\OCR2Word-<phiên bản>-Setup-win64.exe`.
+* Trên GitHub: mở tab **Actions → Build Windows installer → Run workflow** (hoặc đẩy tag `v1.x.y`);
+  bộ cài và bản portable được đính kèm vào Release tương ứng.
 
 ## 3. Cách tool đạt độ chính xác theo ngôn ngữ
 

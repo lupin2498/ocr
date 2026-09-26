@@ -71,6 +71,12 @@ def check_environment(tesseract: str | None, tessdata: str | None, langs: List[s
 
 
 def main(argv: List[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # console Windows: in được tiếng Việt / tiếng Nga
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
     ap = build_parser()
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

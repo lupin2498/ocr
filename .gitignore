@@ -3,6 +3,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!OCR2Word.spec
 .pytest_cache/
 *.docx
 !tests/fixtures/*.docx

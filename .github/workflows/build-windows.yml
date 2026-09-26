@@ -1,0 +1,113 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cài thư viện Python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Đọc phiên bản
+        id: ver
+        run: |
+          $v = python -c "import ocr_tool; print(ocr_tool.__version__)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $v"
+
+      - name: Tải Tesseract-OCR (bản Windows của UB Mannheim) và giải nén
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path build\tesseract | Out-Null
+          $url = gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
+          if (-not $url) { throw "Không tìm thấy bản cài Tesseract" }
+          Write-Host "Tải: $url"
+          Invoke-WebRequest -Uri $url -OutFile build\tesseract-setup.exe
+          7z x build\tesseract-setup.exe -obuild\tesseract -y | Out-Null
+          Get-ChildItem build\tesseract -Directory | Where-Object { $_.Name -like '$*' } | Remove-Item -Recurse -Force
+          if (-not (Test-Path build\tesseract\tesseract.exe)) { throw "Giải nén Tesseract thất bại" }
+          & build\tesseract\tesseract.exe --version
+
+      - name: Tải dữ liệu ngôn ngữ vie / eng / rus (tessdata_best)
+        run: |
+          foreach ($l in @("vie", "eng", "rus", "osd")) {
+            $dst = "build\tesseract\tessdata\$l.traineddata"
+            $repo = if ($l -eq "osd") { "tessdata" } else { "tessdata_best" }
+            Write-Host "Tải $l ..."
+            Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/$repo/raw/main/$l.traineddata" -OutFile $dst
+          }
+          Get-ChildItem build\tesseract\tessdata
+          & build\tesseract\tesseract.exe --list-langs
+
+      - name: Kiểm thử trên Windows
+        env:
+          TESSERACT_CMD: ${{ github.workspace }}\build\tesseract\tesseract.exe
+        run: python -m pytest tests -q
+
+      - name: Đóng gói bằng PyInstaller
+        run: |
+          python -m PyInstaller --noconfirm --clean OCR2Word.spec
+          Copy-Item -Recurse -Force build\tesseract dist\OCR2Word\tesseract
+          Get-ChildItem dist\OCR2Word | Select-Object Name, Length
+
+      - name: Chạy thử bản đóng gói
+        run: |
+          & dist\OCR2Word\ocr2word-cli.exe --check
+          python tests\make_sample.py build\sample.png
+          & dist\OCR2Word\ocr2word-cli.exe build\sample.png -o build\out --txt
+          Get-Content build\out\sample.txt -Encoding utf8 | Select-Object -First 3
+          if (-not (Test-Path build\out\sample.docx)) { throw "Không tạo được file Word" }
+
+      - name: Tạo bản portable (.zip)
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\installer | Out-Null
+          Compress-Archive -Path dist\OCR2Word\* -DestinationPath "dist\installer\OCR2Word-${{ steps.ver.outputs.version }}-portable-win64.zip" -Force
+
+      - name: Tạo bộ cài (Inno Setup)
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\OCR2Word.iss
+          Get-ChildItem dist\installer
+
+      - name: Lưu kết quả build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OCR2Word-${{ steps.ver.outputs.version }}-windows
+          path: dist/installer/*
+          if-no-files-found: error
+
+      - name: Phát hành (Release)
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: OCR2Word ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: dist/installer/*
+          body: |
+            **OCR2Word ${{ steps.ver.outputs.version }}** - chuyển ảnh có chữ (Việt / Anh / Nga) thành file Word, giữ bố cục và bảng.
+
+            - `OCR2Word-*-Setup-win64.exe`: bộ cài cho Windows 10/11 64-bit (đã kèm Tesseract + dữ liệu vie/eng/rus, không cần cài Python).
+            - `OCR2Word-*-portable-win64.zip`: bản chạy ngay không cần cài, giải nén rồi mở `OCR2Word.exe`.
