@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 env:
-  # Phiên bản Tesseract đã kiểm chứng cho tiếng Việt (5.4.0 làm mất dấu ở chữ in hoa / ô bảng)
-  TESSERACT_TAG: v5.3.4.20240503
+  # Dòng Tesseract đã kiểm chứng cho tiếng Việt (5.4.0 làm mất dấu ở chữ in hoa / ô bảng)
+  TESSERACT_SERIES: v5.3.
 
 jobs:
   build:
@@ -44,13 +44,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path build\tesseract | Out-Null
-          $tag = "${{ env.TESSERACT_TAG }}"
-          $url = gh api "repos/UB-Mannheim/tesseract/releases/tags/$tag" --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
-          if (-not $url) {
-            Write-Host "Không thấy bản $tag, dùng bản mới nhất"
-            $url = gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
-          }
-          if (-not $url) { throw "Không tìm thấy bản cài Tesseract" }
+          # Liệt kê các bản cài w64 (tag + url), chọn bản thuộc dòng đã kiểm chứng, dự phòng bản mới nhất
+          $raw = gh api "repos/UB-Mannheim/tesseract/releases?per_page=60" --jq '.[] | select(.prerelease == false) | .tag_name + " " + (.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url)' 2>$null
+          $lines = @($raw -split "`n" | Where-Object { $_ -match '^v\S+ https://' })
+          Write-Host "Các bản có sẵn:"; $lines | ForEach-Object { Write-Host "  $_" }
+          $pick = $lines | Where-Object { $_ -like "${{ env.TESSERACT_SERIES }}*" } | Select-Object -First 1
+          if (-not $pick) { Write-Host "Không có bản ${{ env.TESSERACT_SERIES }}x, dùng bản mới nhất"; $pick = $lines | Select-Object -First 1 }
+          if (-not $pick) { throw "Không tìm thấy bản cài Tesseract" }
+          $tag, $url = $pick -split ' ', 2
+          Write-Host "Chọn: $tag"
           Write-Host "Tải: $url"
           Invoke-WebRequest -Uri $url -OutFile build\tesseract-setup.exe
           7z x build\tesseract-setup.exe -obuild\tesseract -y | Out-Null
