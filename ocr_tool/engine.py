@@ -7,6 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 import pytesseract
 from pytesseract import Output
@@ -126,17 +127,21 @@ class TesseractEngine:
         prof = script_profile(text)
         if prof["cyr"] > 0 or prof["lat"] < 2:
             return lines
-        alt = self.ocr_region(img, "vie", psm)
-        if not alt:
-            return lines
         conf = lambda ls: sum(l.conf for l in ls) / len(ls) if ls else 0.0
-        alt_text = " ".join(ln.text for ln in alt)
-        if len(alt_text) < 0.6 * len(text):
-            return lines
-        more_marks = script_profile(alt_text)["viet"] > prof["viet"]
-        if (more_marks and conf(alt) >= conf(lines) - 8.0) or conf(alt) > conf(lines):
-            return alt
-        return lines
+        best, best_conf, best_marks = lines, conf(lines), prof["viet"]
+        for sc in (1.0, 0.5, 1.5):
+            alt = self.ocr_region(self._scaled(img, sc), "vie", psm)
+            if not alt:
+                continue
+            if sc != 1.0:
+                alt = [Line([self._unscale(w, sc, 0, 0) for w in ln.words]) for ln in alt]
+            alt_text = " ".join(ln.text for ln in alt)
+            if len(alt_text) < 0.6 * len(text):
+                continue
+            marks, c = script_profile(alt_text)["viet"], conf(alt)
+            if (marks > best_marks and c >= best_conf - 8.0) or (marks == best_marks and c > best_conf):
+                best, best_conf, best_marks = alt, c, marks
+        return best
 
     # ------------------------------------------------------------------ toàn trang
     def ocr_page(self, gray: np.ndarray, psm: int = 3) -> List[Block]:
@@ -228,6 +233,20 @@ class TesseractEngine:
         b = min(h, bbox[3] + pad)
         return gray[t:b, l:r], l, t
 
+    @staticmethod
+    def _scaled(img: np.ndarray, scale: float) -> np.ndarray:
+        if scale == 1.0:
+            return img
+        interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+        return cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
+
+    @staticmethod
+    def _unscale(w: Word, scale: float, ox: int, oy: int) -> Word:
+        if scale == 1.0:
+            return w.shifted(ox, oy)
+        return Word(w.text, int(w.left / scale) + ox, int(w.top / scale) + oy,
+                    max(1, int(w.width / scale)), max(1, int(w.height / scale)), w.conf)
+
     def _refine_blocks(self, gray: np.ndarray, blocks: List[Block]) -> List[Block]:
         out: List[Block] = []
         doc_vietnamese = self.page_vietnamese
@@ -238,19 +257,25 @@ class TesseractEngine:
             n_lines = sum(len(p.lines) for p in blk.paragraphs)
             cand_langs = [lang] if lang != self.combined_lang else []
             # Tiêu đề chữ in hoa thường bị mất dấu ở lượt đầu -> thử thêm mô hình tiếng Việt
-            if "vie" in self.langs and lang != "vie" and n_lines <= 3 and "rus" not in lang:
-                cand_langs.append("vie")
-            if not cand_langs:
+            cands = [(cl, 1.0) for cl in cand_langs]
+            # Tiêu đề (khối ngắn) trên trang tiếng Việt: thử mô hình vie ở vài tỉ lệ phóng,
+            # vì dấu trên chữ in hoa/đậm rất nhạy với kích thước ảnh
+            if doc_vietnamese and "vie" in self.langs and n_lines <= 3 and "rus" not in lang:
+                for sc in (1.0, 0.6, 2.0):
+                    if ("vie", sc) not in cands:
+                        cands.append(("vie", sc))
+            if not cands:
                 out.append(blk)
                 continue
-            self.progress(f"Nhận dạng lại khối {i + 1}/{len(blocks)} bằng mô hình [{' | '.join(cand_langs)}] ...")
+            self.progress(f"Nhận dạng lại khối {i + 1}/{len(blocks)} bằng mô hình "
+                          f"[{' | '.join(sorted({c[0] for c in cands}))}] ...")
             pad = max(6, int(blk.paragraphs[0].median_line_height * 0.5))
             crop, ox, oy = self._crop(gray, blk.bbox, pad)
             best = blk
             best_conf = blk.conf
-            for cl in cand_langs:
-                items = self.image_to_words(crop, cl, psm=6)
-                items = [(k, w.shifted(ox, oy)) for k, w in items]
+            for cl, sc in cands:
+                items = self.image_to_words(self._scaled(crop, sc), cl, psm=6)
+                items = [(k, self._unscale(w, sc, ox, oy)) for k, w in items]
                 new_blocks = self.group_words(items)
                 if not new_blocks:
                     continue
@@ -264,17 +289,22 @@ class TesseractEngine:
                 if len(new_blk.text) < 0.7 * len(blk.text):
                     continue
                 # mô hình đúng ngôn ngữ được ưu tiên: chấp nhận nếu không kém quá 3 điểm
-                margin = 3.0 if cl == lang else 0.0
+                margin = 3.0 if (cl == lang and best is blk) else 0.0
                 # Trang tiếng Việt: chấp nhận bản có nhiều dấu hơn dù độ tin cậy thấp hơn chút
                 # (Tesseract thường "tự tin" hơn với bản mất dấu của tiêu đề chữ in)
-                if cl == "vie" and doc_vietnamese and \
-                        script_profile(new_blk.text)["viet"] > script_profile(best.text)["viet"]:
-                    margin = 8.0
-                if new_conf >= best_conf - margin and (best is blk or new_conf > best_conf or margin > 0):
-                    log.debug("block %d: %s conf %.1f -> [%s] conf %.1f (accept)", i, best.lang, best_conf, cl, new_conf)
+                prefer_marks = False
+                if cl == "vie" and doc_vietnamese:
+                    new_marks = script_profile(new_blk.text)["viet"]
+                    old_marks = script_profile(best.text)["viet"]
+                    if new_marks > old_marks:
+                        margin, prefer_marks = 8.0, True
+                    elif new_marks < old_marks:
+                        continue  # không lùi về bản ít dấu hơn
+                if new_conf >= best_conf - margin and (best is blk or new_conf > best_conf or prefer_marks):
+                    log.debug("block %d: %s conf %.1f -> [%s x%.1f] conf %.1f (accept)", i, best.lang, best_conf, cl, sc, new_conf)
                     best, best_conf = new_blk, new_conf
                 else:
-                    log.debug("block %d: keep %s conf %.1f (new [%s] %.1f)", i, best.lang, best_conf, cl, new_conf)
+                    log.debug("block %d: keep %s conf %.1f (new [%s x%.1f] %.1f)", i, best.lang, best_conf, cl, sc, new_conf)
             out.append(best)
         return out
 
