@@ -129,7 +129,9 @@ class Pipeline:
                 lines: List[str] = []
                 align_words = cell_words
                 if self.opts.reocr_cells:
-                    lines, re_words = self._ocr_cell(gray, gc.bbox, lang)
+                    cell_text = " ".join(w.text for w in cell_words)
+                    cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else lang
+                    lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
                     if re_words:
                         align_words = re_words
                 if not lines or (fallback_lines and len(" ".join(lines)) < 0.5 * len(" ".join(fallback_lines))):
@@ -160,7 +162,7 @@ class Pipeline:
         pad = 10
         canvas = np.full((crop.shape[0] + 2 * pad, crop.shape[1] + 2 * pad), 255, dtype=np.uint8)
         canvas[pad:-pad, pad:-pad] = crop
-        lines = self.engine.ocr_region(canvas, lang=lang, psm=6)
+        lines = self.engine.ocr_region_best(canvas, lang=lang, psm=6)
         texts = [ln.text for ln in lines if ln.text.strip()]
         words = []
         for ln in lines:

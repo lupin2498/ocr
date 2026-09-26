@@ -55,6 +55,7 @@ class TesseractEngine:
         self.refine_lines = refine_lines
         self.line_conf_threshold = line_conf_threshold
         self.progress = progress or (lambda msg: None)
+        self.page_vietnamese = False  # được cập nhật sau mỗi lần ocr_page
 
     # ------------------------------------------------------------------ cơ bản
     @property
@@ -115,6 +116,28 @@ class TesseractEngine:
         blocks = self.group_words(items)
         return [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
 
+    def ocr_region_best(self, img: np.ndarray, lang: str, psm: int = 6) -> List[Line]:
+        """OCR vùng nhỏ bằng `lang`; với trang tiếng Việt, nếu kết quả là chữ Latin
+        thì thử thêm mô hình `vie` và giữ bản có dấu đầy đủ hơn (độ tin cậy không kém quá 8 điểm)."""
+        lines = self.ocr_region(img, lang, psm)
+        if not self.page_vietnamese or "vie" not in self.langs or lang == "vie":
+            return lines
+        text = " ".join(ln.text for ln in lines)
+        prof = script_profile(text)
+        if prof["cyr"] > 0 or prof["lat"] < 2:
+            return lines
+        alt = self.ocr_region(img, "vie", psm)
+        if not alt:
+            return lines
+        conf = lambda ls: sum(l.conf for l in ls) / len(ls) if ls else 0.0
+        alt_text = " ".join(ln.text for ln in alt)
+        if len(alt_text) < 0.6 * len(text):
+            return lines
+        more_marks = script_profile(alt_text)["viet"] > prof["viet"]
+        if (more_marks and conf(alt) >= conf(lines) - 8.0) or conf(alt) > conf(lines):
+            return alt
+        return lines
+
     # ------------------------------------------------------------------ toàn trang
     def ocr_page(self, gray: np.ndarray, psm: int = 3) -> List[Block]:
         self.progress(f"OCR toàn trang ({self.combined_lang}) ...")
@@ -123,6 +146,10 @@ class TesseractEngine:
         for b in blocks:
             b.lang = self.combined_lang
         blocks = self.merge_split_blocks(blocks)
+        # Ưu tiên tiếng Việt cho cả trang nếu phần lớn chữ Latin trên trang có dấu tiếng Việt
+        page_profile = script_profile("\n".join(b.text for b in blocks))
+        self.page_vietnamese = "vie" in self.langs and \
+            page_profile["viet"] >= 0.04 * max(1, page_profile["lat"])
         if self.refine_blocks and len(self.langs) > 1:
             blocks = self._refine_blocks(gray, blocks)
         if self.refine_lines:
@@ -203,9 +230,7 @@ class TesseractEngine:
 
     def _refine_blocks(self, gray: np.ndarray, blocks: List[Block]) -> List[Block]:
         out: List[Block] = []
-        # Ưu tiên tiếng Việt cho cả trang nếu phần lớn chữ Latin trên trang có dấu tiếng Việt
-        page_profile = script_profile("\n".join(b.text for b in blocks))
-        doc_vietnamese = "vie" in self.langs and page_profile["viet"] >= 0.04 * max(1, page_profile["lat"])
+        doc_vietnamese = self.page_vietnamese
         for i, blk in enumerate(blocks):
             if blk.is_empty():
                 continue

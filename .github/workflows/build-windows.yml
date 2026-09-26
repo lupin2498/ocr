@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # Phiên bản Tesseract đã kiểm chứng cho tiếng Việt (5.4.0 làm mất dấu ở chữ in hoa / ô bảng)
+  TESSERACT_TAG: v5.3.4.20240503
+
 jobs:
   build:
     runs-on: windows-latest
@@ -40,7 +44,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path build\tesseract | Out-Null
-          $url = gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
+          $tag = "${{ env.TESSERACT_TAG }}"
+          $url = gh api "repos/UB-Mannheim/tesseract/releases/tags/$tag" --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
+          if (-not $url) {
+            Write-Host "Không thấy bản $tag, dùng bản mới nhất"
+            $url = gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' | Select-Object -First 1
+          }
           if (-not $url) { throw "Không tìm thấy bản cài Tesseract" }
           Write-Host "Tải: $url"
           Invoke-WebRequest -Uri $url -OutFile build\tesseract-setup.exe

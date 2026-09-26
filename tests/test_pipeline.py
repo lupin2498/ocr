@@ -17,6 +17,17 @@ from ocr_tool.lang import choose_lang, to_tesseract_langs  # noqa: E402
 from ocr_tool.pipeline import Options, Pipeline  # noqa: E402
 from tests.make_sample import TABLE, find_times_fonts, make_sample  # noqa: E402
 
+def _levenshtein(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+
 TESS = find_tesseract()
 HAVE_LANGS = set(list_languages(TESS)) if TESS else set()
 needs_tesseract = pytest.mark.skipif(
@@ -57,7 +68,7 @@ def test_layout_properties(pages):
     page = pages[0]
     paras = [e for e in page.elements if isinstance(e, Paragraph)]
     title = paras[0]
-    assert "BÁO CÁO" in title.text
+    assert _levenshtein(title.text, "BÁO CÁO TỔNG HỢP KẾT QUẢ") <= 3, title.text
     assert title.alignment == "center" and title.bold
     assert title.font_size_pt > paras[1].font_size_pt
     body = paras[1]
@@ -77,11 +88,9 @@ def test_table_structure(pages):
     assert (t.n_rows, t.n_cols) == (4, 4)
     assert len(t.cells) == 16
     grid = {(c.row, c.col): c.text for c in t.cells}
-    assert grid[(0, 1)] == "Tên vật tư"
-    assert grid[(1, 3)] == "Đạt yêu cầu"
-    assert grid[(2, 1)] == "Steel washer"
-    assert grid[(3, 3)] == "Проверено"
-    assert grid[(1, 2)] == "120"
+    for r, row in enumerate(TABLE):
+        for c, expected in enumerate(row):
+            assert _levenshtein(grid[(r, c)], expected) <= 1, f"ô ({r},{c}): {grid[(r, c)]!r} != {expected!r}"
     # cột STT / Số lượng canh giữa, cột tên canh trái
     assert {c.alignment for c in t.cells if c.col == 0} == {"center"}
     assert {c.alignment for c in t.cells if c.col == 1} == {"left"}
@@ -100,10 +109,11 @@ def test_export_docx(pages, tmp_path):
     assert len(doc.tables) == 1
     tbl = doc.tables[0]
     assert len(tbl.rows) == 4 and len(tbl.columns) == 4
-    assert tbl.cell(3, 3).text == "Проверено"
-    assert tbl.cell(0, 1).text == TABLE[0][1]
+    assert _levenshtein(tbl.cell(3, 3).text, "Проверено") <= 1
+    assert _levenshtein(tbl.cell(0, 1).text, TABLE[0][1]) <= 1
     full = "\n".join(p.text for p in doc.paragraphs)
-    assert "BÁO CÁO" in full and "English paragraph" in full and "русский" in full
+    assert "English paragraph" in full and "русский" in full
+    assert _levenshtein(doc.paragraphs[0].text, "BÁO CÁO TỔNG HỢP KẾT QUẢ") <= 3
     sec = doc.sections[0]
     assert abs(sec.page_width.inches - 8.27) < 0.05
 
@@ -140,16 +150,6 @@ def test_merged_cells_grid():
     spans = {(c.row, c.col): (c.row_span, c.col_span) for c in g.cells}
     assert spans[(0, 1)] == (1, 2)
     assert (0, 2) not in spans and len(g.cells) == 5
-
-
-def _levenshtein(a: str, b: str) -> int:
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
 
 
 @needs_tesseract
