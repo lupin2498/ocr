@@ -11,7 +11,7 @@ permissions:
 
 env:
   # Dòng Tesseract đã kiểm chứng cho tiếng Việt (5.4.0 làm mất dấu ở chữ in hoa / ô bảng)
-  TESSERACT_SERIES: v5.3.
+  TESSERACT_SERIES: "5.3."
 
 jobs:
   build:
@@ -44,15 +44,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path build\tesseract | Out-Null
-          # Liệt kê các bản cài w64 (tag + url), chọn bản thuộc dòng đã kiểm chứng, dự phòng bản mới nhất
-          $raw = gh api "repos/UB-Mannheim/tesseract/releases?per_page=60" --jq '.[] | select(.prerelease == false) | .tag_name + " " + (.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url)' 2>$null
-          $lines = @($raw -split "`n" | Where-Object { $_ -match '^v\S+ https://' })
-          Write-Host "Các bản có sẵn:"; $lines | ForEach-Object { Write-Host "  $_" }
-          $pick = $lines | Where-Object { $_ -like "${{ env.TESSERACT_SERIES }}*" } | Select-Object -First 1
-          if (-not $pick) { Write-Host "Không có bản ${{ env.TESSERACT_SERIES }}x, dùng bản mới nhất"; $pick = $lines | Select-Object -First 1 }
-          if (-not $pick) { throw "Không tìm thấy bản cài Tesseract" }
-          $tag, $url = $pick -split ' ', 2
-          Write-Host "Chọn: $tag"
+          # Máy chủ UB Mannheim lưu đầy đủ các phiên bản; GitHub Releases chỉ giữ bản mới nhất
+          $names = @()
+          try {
+            $html = (Invoke-WebRequest -Uri "https://digi.bib.uni-mannheim.de/tesseract/" -UseBasicParsing).Content
+            $names = @([regex]::Matches($html, 'tesseract-ocr-w64-setup-(\d+\.\d+\.\d+\.\d+)\.exe') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique -Descending)
+          } catch { Write-Host "Không đọc được digi.bib.uni-mannheim.de: $_" }
+          Write-Host "Các bản có sẵn: $($names -join ', ')"
+          $series = "${{ env.TESSERACT_SERIES }}"
+          $ver = $names | Where-Object { $_.StartsWith($series) } | Select-Object -First 1
+          if ($ver) {
+            $url = "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-$ver.exe"
+          } else {
+            Write-Host "Không có bản ${series}x, dùng bản mới nhất trên GitHub"
+            $url = gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.assets[] | select(.name | test("w64-setup.*\\.exe$")) | .browser_download_url' 2>$null | Select-Object -First 1
+          }
+          if (-not $url -or -not "$url".StartsWith("https://")) { throw "Không tìm thấy bản cài Tesseract" }
           Write-Host "Tải: $url"
           Invoke-WebRequest -Uri $url -OutFile build\tesseract-setup.exe
           7z x build\tesseract-setup.exe -obuild\tesseract -y | Out-Null
@@ -70,6 +77,25 @@ jobs:
           }
           Get-ChildItem build\tesseract\tessdata
           & build\tesseract\tesseract.exe --list-langs
+
+      - name: Chẩn đoán chất lượng OCR theo phiên bản Tesseract (tham khảo)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $env:TESSERACT_CMD = "${{ github.workspace }}\build\tesseract\tesseract.exe"
+          python tools\diag_sample.py
+          foreach ($v in @("5.5.0.20241111", "5.4.0.20240606")) {
+            $dir = "build\diag\$v"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            try {
+              Invoke-WebRequest -Uri "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-$v.exe" -OutFile "build\diag\$v.exe"
+              7z x "build\diag\$v.exe" "-o$dir" -y | Out-Null
+              foreach ($l in @("vie", "eng", "rus", "osd")) { Copy-Item "build\tesseract\tessdata\$l.traineddata" "$dir\tessdata\" -Force }
+              $env:TESSERACT_CMD = "${{ github.workspace }}\$dir\tesseract.exe"
+              python tools\diag_sample.py
+            } catch { Write-Host "Bỏ qua $v : $_" }
+          }
 
       - name: Kiểm thử trên Windows
         env:
