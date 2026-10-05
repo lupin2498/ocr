@@ -111,6 +111,15 @@ class App(tk.Tk):
         ttk.Checkbutton(row3, text="Gộp tất cả thành 1 file Word", variable=self.merge_var).pack(side="left", padx=4)
         ttk.Checkbutton(row3, text="Xuất thêm .txt", variable=self.txt_var).pack(side="left", padx=4)
 
+        row3b = ttk.Frame(of)
+        row3b.pack(fill="x", padx=6, pady=3)
+        self.figures_var = tk.BooleanVar(value=True)
+        self.spell_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row3b, text="Nhận diện hình vẽ/ảnh (giữ nguyên ảnh)",
+                        variable=self.figures_var).pack(side="left", padx=4)
+        ttk.Checkbutton(row3b, text="Sửa chính tả tiếng Việt", variable=self.spell_var).pack(side="left", padx=4)
+        ttk.Button(row3b, text="Từ điển của tôi...", command=self._open_user_dict).pack(side="left", padx=8)
+
         row4 = ttk.Frame(of)
         row4.pack(fill="x", padx=6, pady=3)
         ttk.Label(row4, text="Thư mục kết quả:").pack(side="left")
@@ -189,6 +198,30 @@ class App(tk.Tk):
         if missing:
             self._log(f"⚠ Thiếu dữ liệu ngôn ngữ: {', '.join(missing)} - chạy setup_windows.bat để tải.")
 
+    def _open_user_dict(self) -> None:
+        from .spellfix import user_dict_path
+
+        path = user_dict_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(
+                    "# Từ điển của bạn cho OCR2Word (UTF-8). Mỗi dòng một mục:\n"
+                    "#   sai => đúng     : thay thế cố định sau OCR (ví dụ: tr- ớc => trước)\n"
+                    "#   từ / cụm từ     : thuật ngữ cần giữ nguyên và dùng làm ngữ cảnh (ví dụ: ống khuếch tán)\n",
+                    encoding="utf-8")
+            if os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+            self._log(f"Từ điển: {path} (lưu file rồi chạy lại để áp dụng)")
+            import ocr_tool.spellfix as _sf
+            _sf._LEXICON = None  # nạp lại ở lần chạy sau
+        except OSError as e:
+            messagebox.showerror("Lỗi", str(e))
+
     def _log(self, msg: str) -> None:
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n")
@@ -228,6 +261,7 @@ class App(tk.Tk):
             deskew=self.deskew_var.get(), denoise=self.denoise_var.get(),
             detect_tables=self.tables_var.get(), refine_blocks=self.refine_var.get(),
             refine_lines=self.refine_var.get(),
+            detect_figures=self.figures_var.get(), spellfix=self.spell_var.get(),
             progress=lambda m: self._queue.put(("log", "   " + m)),
         )
         out_dir = self.out_var.get().strip() or None

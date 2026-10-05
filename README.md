@@ -77,6 +77,9 @@ ocr2word.bat --check
 | `--denoise`, `--binarize`, `--no-deskew` | tuỳ chọn tiền xử lý cho ảnh chụp kém |
 | `--psm N` | chế độ phân trang Tesseract (3 = tự động, 4 = cột đơn, 6 = khối đều) |
 | `--txt` | xuất thêm file `.txt` |
+| `--no-figures` | không nhận diện hình (mặc định hình được giữ nguyên dạng ảnh) |
+| `--no-spellfix` | không sửa chính tả tiếng Việt |
+| `--dict FILE` | từ điển bổ sung (`sai => đúng` hoặc một từ mỗi dòng) |
 | `--check` | kiểm tra Tesseract và dữ liệu ngôn ngữ |
 
 ### Tự đóng gói thành `.exe` / bộ cài
@@ -95,7 +98,35 @@ ocr2word.bat --check
 * Các dòng có độ tin cậy thấp được OCR lại với từng ngôn ngữ và giữ kết quả tốt nhất.
 * Ô bảng được OCR riêng từng ô (loại bỏ ảnh hưởng của đường kẻ).
 
-## 4. Bố cục được tái tạo
+## 4. Sửa chính tả tiếng Việt sau OCR
+
+Sau khi OCR, chương trình tự sửa chính tả cho các đoạn tiếng Việt (tiếng Anh, tiếng Nga, số liệu, ký hiệu
+kỹ thuật như `TB2-117A`, `Mi-8`, `ĐC`, `TBMN` được giữ nguyên):
+
+* **Khôi phục chữ "ư" bị in/đọc thành dấu gạch** – lỗi rất hay gặp ở sách scan từ phông TCVN3/.VnTime:
+  `đ-ợc`, `tr- ớc`, `h−ớng`, `nh- sau`, `1-u l-ợng` → `được`, `trước`, `hướng`, `như sau`, `lưu lượng`.
+* **Sửa từng âm tiết theo luật chính tả và từ điển**: âm tiết sai luật (`cất cănh`, `định mữtc`, `viêc`)
+  được thay bằng từ gần nhất (khác dấu hoặc sai một ký tự) có điểm cao nhất.
+* **Dùng ngữ cảnh của chính tài liệu**: cụm từ lặp lại nhiều lần trong tài liệu (`máy nén`, `ổ đỡ`,
+  `phòng băng`, `ổ bi đũa`…) được dùng để sửa chỗ OCR đọc nhầm dấu (`may nén`, `Ô đỡ`, `phing bang`, `ổ bi đữa`).
+* **Từ điển của bạn**: nút *Từ điển của tôi...* (hoặc `--dict file.txt`) mở file `tu_dien.txt`
+  (`%APPDATA%\OCR2Word\tu_dien.txt`). Mỗi dòng `sai => đúng` là một thay thế cố định; mỗi dòng chỉ có
+  từ/cụm từ là thuật ngữ cần giữ nguyên và dùng làm ngữ cảnh.
+* Tắt bằng bỏ chọn *Sửa chính tả tiếng Việt* hoặc `--no-spellfix`.
+
+## 5. Hình vẽ và ảnh được giữ nguyên
+
+Chương trình tự nhận diện vùng **hình vẽ kỹ thuật, sơ đồ, ảnh chụp** trên trang và chèn **nguyên ảnh** vào
+file Word (đúng vị trí, đúng kích thước, canh giữa nếu hình nằm giữa trang) thay vì OCR ra ký tự rác:
+
+* Nét vẽ, khối đen, vùng bán sắc lớn hơn ký tự được gom thành vùng hình.
+* Nhãn chú thích nằm trong/sát hình (`Vỏ trước`, `Lá dẫn dòng`…) thuộc về hình, không bị tách ra thành chữ.
+* Dòng tiêu đề hình (`Hình 2.1. …`, `Bảng …`) và đoạn văn bên cạnh vẫn là chữ để sửa được.
+* "Bảng" thực chất là hình vẽ (nhiều nét vẽ ngoài chữ, ô toàn ký tự rác) được giữ dạng ảnh; bảng thật vẫn là bảng Word.
+* Dòng chữ Tesseract bỏ sót cạnh ảnh được đọc bổ sung.
+* Tắt bằng bỏ chọn *Nhận diện hình vẽ/ảnh* hoặc `--no-figures`.
+
+## 6. Bố cục được tái tạo
 
 * Khổ giấy theo DPI của ảnh (hoặc A4 dọc / ngang), lề theo vùng chữ thật.
 * Canh trái / giữa / phải / đều hai bên, thụt đầu dòng, thụt cả đoạn, khoảng cách đoạn, giãn dòng.
@@ -103,7 +134,7 @@ ocr2word.bat --check
 * Bảng: số hàng / cột, độ rộng cột, chiều cao hàng, ô gộp, canh lề trong ô, vị trí bảng trong trang.
 * PDF / TIFF nhiều trang → mỗi trang một section, đúng hướng giấy.
 
-## 5. Cấu trúc mã nguồn
+## 7. Cấu trúc mã nguồn
 
 ```
 ocr_tool/
@@ -111,6 +142,10 @@ ocr_tool/
   engine.py       gọi Tesseract, gom từ → dòng → đoạn → khối, OCR lại theo ngôn ngữ
   lang.py         nhận diện hệ chữ, chọn mô hình ngôn ngữ
   tables.py       phát hiện bảng và ô gộp bằng OpenCV
+  figures.py      nhận diện hình vẽ / ảnh, giữ nguyên ảnh
+  spellfix.py     sửa chính tả tiếng Việt sau OCR (khôi phục "ư", từ điển + ngữ cảnh tài liệu)
+  vnsyllable.py   kiểm tra âm tiết tiếng Việt hợp lệ
+  data/           từ điển âm tiết (từ FrequencyWords, CC BY-SA 4.0), từ ghép, từ điển bổ sung
   layout.py       suy ra khổ giấy, lề, canh lề, cỡ chữ, giãn cách
   pipeline.py     nối các bước, tách chữ trong bảng khỏi văn bản, thứ tự đọc
   export_docx.py  xuất Word
@@ -120,7 +155,7 @@ tests/            kiểm thử đầu-cuối với ảnh mẫu 3 ngôn ngữ + b
 
 Chạy kiểm thử: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
-## 6. Mẹo để kết quả tốt
+## 8. Mẹo để kết quả tốt
 
 * Scan / chụp ≥ 300 dpi, chữ rõ, không lệch quá 10°; ảnh nhỏ được tự phóng to.
 * Chỉ bật các ngôn ngữ thực sự có trong tài liệu.

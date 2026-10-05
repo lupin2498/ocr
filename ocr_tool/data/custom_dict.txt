@@ -1,0 +1,10 @@
+# Từ điển bổ sung đi kèm chương trình (người dùng sửa ở file tu_dien.txt, xem README).
+# Mỗi dòng:
+#   sai => đúng        thay thế cố định sau OCR, ví dụ:  CKHA => СКНА
+#   từ hoặc cụm từ     thêm vào từ điển / giữ nguyên, ví dụ:  la-bi-rin
+rôto
+stato
+buji
+pít tông
+la-bi-rin
+tua bin

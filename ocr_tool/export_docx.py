@@ -11,7 +11,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
-from .document import Page, Paragraph, Table
+from .document import Figure, Page, Paragraph, Table
 
 _ALIGN = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -96,6 +96,8 @@ class DocxExporter:
                 self._write_paragraph(doc, page, el)
             elif isinstance(el, Table):
                 self._write_table(doc, page, el)
+            elif isinstance(el, Figure):
+                self._write_figure(doc, page, el)
 
     def _write_paragraph(self, doc, page: Page, p: Paragraph) -> None:
         para = doc.add_paragraph()
@@ -118,6 +120,37 @@ class DocxExporter:
         else:
             run = para.add_run(_join_lines(lines))
             _set_run_font(run, self.font_name, p.font_size_pt, p.bold)
+
+    def _write_figure(self, doc, page: Page, f: Figure) -> None:
+        import io
+
+        import cv2
+        import numpy as np
+
+        img = f.image
+        if img is None or getattr(img, "size", 0) == 0:
+            return
+        # giới hạn độ phân giải ảnh nhúng ~300 dpi để file Word không quá nặng
+        scale = min(1.0, 300.0 / max(1.0, page.dpi))
+        if scale < 0.98:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        photo = len(np.unique(gray[::4, ::4])) > 64
+        ok, buf = cv2.imencode(".jpg" if photo else ".png", img,
+                               [cv2.IMWRITE_JPEG_QUALITY, 90] if photo else [cv2.IMWRITE_PNG_COMPRESSION, 6])
+        if not ok:
+            return
+        width_in = page.px_to_in(f.bbox[2] - f.bbox[0])
+        max_w = page.page_width_in - page.margin_left_in - page.margin_right_in
+        width_in = max(0.3, min(width_in, max_w - f.left_indent_in))
+        para = doc.add_paragraph()
+        para.alignment = _ALIGN.get(f.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        pf = para.paragraph_format
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(f.space_after_pt)
+        if f.left_indent_in:
+            pf.left_indent = Inches(f.left_indent_in)
+        para.add_run().add_picture(io.BytesIO(buf.tobytes()), width=Inches(width_in))
 
     def _write_table(self, doc, page: Page, t: Table) -> None:
         if t.n_rows < 1 or t.n_cols < 1:

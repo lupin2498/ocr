@@ -2,7 +2,7 @@
 # Spec PyInstaller: tạo thư mục dist/OCR2Word chứa OCR2Word.exe (giao diện) và ocr2word-cli.exe (dòng lệnh).
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-datas = collect_data_files("docx") + [("assets/icon.ico", "assets")]
+datas = collect_data_files("docx") + [("assets/icon.ico", "assets"), ("ocr_tool/data", "ocr_tool/data")]
 hiddenimports = (
     ["ocr_tool", "ocr_tool.gui", "ocr_tool.cli", "pymupdf", "fitz"]
     + collect_submodules("docx")

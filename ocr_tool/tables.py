@@ -64,6 +64,15 @@ def _line_masks(gray: np.ndarray, min_h_len: int, min_v_len: int) -> Tuple[np.nd
     return horiz, vert
 
 
+def grid_line_mask(gray: np.ndarray, text_height: float = 30.0) -> np.ndarray:
+    """Mặt nạ các đường kẻ ngang/dọc (dùng để kiểm tra bảng có phải hình vẽ không)."""
+    h, w = gray.shape[:2]
+    min_h_len = int(max(text_height * 2.5, w * 0.03, 25))
+    min_v_len = int(max(text_height * 1.2, h * 0.015, 25))
+    horiz, vert = _line_masks(gray, min_h_len, min_v_len)
+    return cv2.bitwise_or(horiz, vert)
+
+
 def detect_tables(gray: np.ndarray, text_height: float = 30.0) -> List[TableGrid]:
     """Tìm các bảng có kẻ khung. `text_height` là chiều cao dòng chữ trung bình (px)
     để đặt ngưỡng độ dài đường kẻ."""

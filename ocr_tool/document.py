@@ -144,6 +144,7 @@ class Table:
     cells: List[TableCell] = field(default_factory=list)
     font_size_pt: float = 11.0
     space_after_pt: float = 6.0
+    word_boxes: List[BBox] = field(default_factory=list, repr=False)  # vị trí chữ đã đọc trong bảng
 
     @property
     def n_rows(self) -> int:
@@ -162,7 +163,25 @@ class Table:
         return self.bbox[3]
 
 
-Element = Union[Paragraph, Table]
+@dataclass
+class Figure:
+    """Vùng hình vẽ / ảnh: giữ nguyên ảnh gốc, không OCR."""
+    bbox: BBox
+    image: object = None  # numpy.ndarray (BGR) cắt từ trang
+    alignment: str = "center"
+    left_indent_in: float = 0.0
+    space_after_pt: float = 6.0
+
+    @property
+    def top(self) -> int:
+        return self.bbox[1]
+
+    @property
+    def bottom(self) -> int:
+        return self.bbox[3]
+
+
+Element = Union[Paragraph, Table, Figure]
 
 
 @dataclass
@@ -196,6 +215,8 @@ class Page:
         for el in self.elements:
             if isinstance(el, Paragraph):
                 parts.append(el.text)
+            elif isinstance(el, Figure):
+                parts.append("[Hình ảnh]")
             else:
                 for r in range(el.n_rows):
                     row_cells = [c for c in el.cells if c.row == r]

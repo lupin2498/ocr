@@ -35,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-refine", action="store_true",
                     help="tắt bước nhận dạng lại theo ngôn ngữ từng khối/dòng (nhanh hơn, kém chính xác)")
     ap.add_argument("--fast-tables", action="store_true", help="không OCR lại từng ô bảng")
+    ap.add_argument("--no-figures", action="store_true",
+                    help="không nhận diện hình vẽ/ảnh (mặc định: hình được giữ nguyên dạng ảnh)")
+    ap.add_argument("--no-spellfix", action="store_true", help="không sửa chính tả tiếng Việt sau OCR")
+    ap.add_argument("--dict", metavar="FILE", help="từ điển bổ sung (mỗi dòng: 'sai => đúng' hoặc một từ)")
     ap.add_argument("--psm", type=int, default=3, help="chế độ phân trang Tesseract (mặc định 3)")
     ap.add_argument("--pdf-dpi", type=int, default=300, help="độ phân giải khi đọc PDF")
     ap.add_argument("--txt", action="store_true", help="xuất thêm file .txt thuần")
@@ -112,7 +116,11 @@ def main(argv: List[str] | None = None) -> int:
         detect_tables=not args.no_tables, reocr_cells=not args.fast_tables,
         refine_blocks=not args.no_refine, refine_lines=not args.no_refine,
         psm=args.psm, pdf_dpi=args.pdf_dpi, progress=lambda m: print("  " + m),
+        detect_figures=not args.no_figures, spellfix=not args.no_spellfix,
     )
+    if args.dict:
+        from .spellfix import get_lexicon
+        get_lexicon().load_user_dict(Path(args.dict))
     pipe = Pipeline(opts)
 
     out_dir: Path | None = None

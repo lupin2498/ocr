@@ -5,7 +5,7 @@ import logging
 from statistics import median
 from typing import List, Optional, Tuple
 
-from .document import BBox, Element, Page, Paragraph, Table
+from .document import BBox, Element, Figure, Page, Paragraph, Table
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +112,9 @@ def _style_elements(page: Page) -> None:
         for el in page.elements:
             if isinstance(el, Table):
                 el.font_size_pt = 11.0
+        heights = [max(12.0, page.dpi / 6)]
+        paras = []
+    if not paras:
         return
     base_h = float(median(heights))
     base_pt = float(median([_font_size_pt(page, p) for p in paras]))
@@ -123,6 +126,19 @@ def _style_elements(page: Page) -> None:
 
     for idx, el in enumerate(page.elements):
         nxt = page.elements[idx + 1] if idx + 1 < len(page.elements) else None
+        if isinstance(el, Figure):
+            fcx = (el.bbox[0] + el.bbox[2]) / 2
+            if abs(fcx - (cL + cR) / 2) <= 0.08 * content_w or abs(fcx - page_cx) <= 0.06 * page.width_px:
+                el.alignment = "center"
+                el.left_indent_in = 0.0
+            elif el.bbox[2] >= cR - 0.05 * content_w and el.bbox[0] > cL + 0.3 * content_w:
+                el.alignment = "right"
+                el.left_indent_in = 0.0
+            else:
+                el.alignment = "left"
+                el.left_indent_in = max(0.0, page.px_to_in(el.bbox[0] - cL))
+            el.space_after_pt = _space_after(page, el.bottom, nxt, base_h)
+            continue
         if isinstance(el, Table):
             el.font_size_pt = max(7.0, min(base_pt, 12.0))
             el.space_after_pt = _space_after(page, el.bottom, nxt, base_h)
