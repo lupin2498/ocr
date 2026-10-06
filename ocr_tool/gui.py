@@ -118,6 +118,9 @@ class App(tk.Tk):
         ttk.Checkbutton(row3b, text="Nhận diện hình vẽ/ảnh (giữ nguyên ảnh)",
                         variable=self.figures_var).pack(side="left", padx=4)
         ttk.Checkbutton(row3b, text="Sửa chính tả tiếng Việt", variable=self.spell_var).pack(side="left", padx=4)
+        self.pdftext_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row3b, text="PDF có sẵn chữ: đọc trực tiếp (TCVN3/Unicode)",
+                        variable=self.pdftext_var).pack(side="left", padx=4)
         ttk.Button(row3b, text="Từ điển của tôi...", command=self._open_user_dict).pack(side="left", padx=8)
 
         row4 = ttk.Frame(of)
@@ -262,6 +265,7 @@ class App(tk.Tk):
             detect_tables=self.tables_var.get(), refine_blocks=self.refine_var.get(),
             refine_lines=self.refine_var.get(),
             detect_figures=self.figures_var.get(), spellfix=self.spell_var.get(),
+            use_pdf_text=self.pdftext_var.get(),
             progress=lambda m: self._queue.put(("log", "   " + m)),
         )
         out_dir = self.out_var.get().strip() or None

@@ -16,6 +16,7 @@ from .layout import build_page
 from .preprocess import LoadedImage, load_inputs, preprocess
 from .figures import (CAPTION_RE, crop_figure, detect_figures, merge_regions, table_is_figure,
                       text_quality)
+from .ocr_cleanup import clean_ocr_text
 from .spellfix import DocModel, SpellFixer, get_lexicon, is_vietnamese_text
 from .tables import TableGrid, detect_tables, grid_line_mask
 
@@ -38,6 +39,7 @@ class Options:
     line_conf_threshold: float = 70.0
     pdf_dpi: int = 300
     psm: int = 3
+    use_pdf_text: bool = True       # PDF có lớp chữ: đọc trực tiếp (kể cả mã TCVN3) thay vì OCR
     detect_figures: bool = True     # nhận diện hình vẽ/ảnh và giữ nguyên dạng ảnh
     spellfix: bool = True           # sửa chính tả tiếng Việt sau OCR
     progress: Optional[Callable[[str], None]] = None
@@ -54,7 +56,7 @@ class Pipeline:
 
     # ------------------------------------------------------------------ vào/ra
     def process_file(self, path: str) -> List[Page]:
-        images = load_inputs(path, pdf_dpi=self.opts.pdf_dpi)
+        images = load_inputs(path, pdf_dpi=self.opts.pdf_dpi, use_pdf_text=self.opts.use_pdf_text)
         pages = []
         for li in images:
             self.progress(f"Trang {li.page_index + 1}/{len(images)} của {li.source}")
@@ -79,20 +81,23 @@ class Pipeline:
         for pg in pages:
             for el in pg.elements:
                 if isinstance(el, Paragraph):
+                    if el.lang == "pdf":
+                        continue  # chữ lấy từ lớp chữ PDF: đã chính xác
                     for ln in el.lines:
                         if not ln.words:
                             continue
                         old = ln.text
-                        if not is_vietnamese_text(old):
-                            continue
-                        new = fixer.fix_line(old)
+                        new = clean_ocr_text(old)
+                        if is_vietnamese_text(new):
+                            new = fixer.fix_line(new)
                         if new != old:
                             b = ln.bbox
                             conf = ln.conf
                             ln.words = [Word(new, b[0], b[1], b[2] - b[0], b[3] - b[1], conf)]
-                elif isinstance(el, Table):
+                elif isinstance(el, Table) and not el.from_text_layer:
                     for c in el.cells:
-                        c.lines = [fixer.fix_line(t) if is_vietnamese_text(t) else t for t in c.lines]
+                        cl = [clean_ocr_text(t) for t in c.lines]
+                        c.lines = [fixer.fix_line(t) if is_vietnamese_text(t) else t for t in cl if t.strip()]
         n = sum(fixer.changes.values())
         if n:
             log.info("đã sửa %d lỗi chính tả", n)
@@ -104,35 +109,56 @@ class Pipeline:
     # ------------------------------------------------------------------ một trang
     def process_image(self, li: LoadedImage, fix_spelling: bool = True) -> Page:
         o = self.opts
-        pre = preprocess(li.image, do_deskew=o.deskew, do_denoise=o.denoise,
-                         do_binarize=o.binarize, upscale=o.upscale)
+        text_layer = self._usable_text_layer(li) if o.use_pdf_text else None
+        if text_layer is not None:
+            # PDF có lớp chữ: ảnh trang dựng đúng toạ độ, không xoay / phóng
+            pre = preprocess(li.image, do_deskew=False, do_denoise=False, do_binarize=False, upscale=False)
+        else:
+            pre = preprocess(li.image, do_deskew=o.deskew, do_denoise=o.denoise,
+                             do_binarize=o.binarize, upscale=o.upscale)
         gray = pre.gray
         h, w = gray.shape[:2]
         dpi = li.dpi * pre.scale if li.dpi else None
         if pre.angle:
             log.info("đã xoay %.2f độ", pre.angle)
 
-        blocks = self.engine.ocr_page(gray, psm=o.psm)
+        if text_layer is not None:
+            self.progress("Đọc lớp chữ có sẵn trong PDF (không cần OCR) ...")
+            blocks = [Block(list(text_layer.paragraphs), lang="pdf")] if text_layer.paragraphs else []
+        else:
+            blocks = self.engine.ocr_page(gray, psm=o.psm)
         text_h = self._median_line_height(blocks, default=max(12.0, h / 90))
 
         tables: List[Table] = []
         grids: List[TableGrid] = []
         if o.detect_tables:
             self.progress("Phát hiện bảng ...")
-            grids = detect_tables(gray, text_height=text_h)
+            if text_layer is not None and text_layer.rules:
+                # kẻ bảng vector trong PDF: dựng ảnh chỉ gồm các đường kẻ -> lưới bảng chính xác
+                canvas = np.full_like(gray, 255)
+                for (x0, y0, x1, y1) in text_layer.rules:
+                    cv2.rectangle(canvas, (x0, y0), (max(x0, x1), max(y0, y1)), 0, thickness=-1)
+                    cv2.rectangle(canvas, (x0 - 1, y0 - 1), (max(x0, x1) + 1, max(y0, y1) + 1), 0, thickness=2)
+                grids = detect_tables(canvas, text_height=text_h)
+            else:
+                grids = detect_tables(gray, text_height=text_h)
             if grids:
-                blocks, tables = self._extract_tables(gray, blocks, grids)
+                blocks, tables = self._extract_tables(gray, blocks, grids, from_text_layer=text_layer is not None)
 
         figures: List[Figure] = []
         if o.detect_figures:
             self.progress("Nhận diện hình vẽ / ảnh ...")
-            tables, fig_boxes = self._find_figures(gray, blocks, tables, text_h)
+            tables, fig_boxes = self._find_figures(gray, blocks, tables, text_h,
+                                                   extra_boxes=text_layer.image_boxes if text_layer else ())
             if fig_boxes:
+                fig_boxes = self._trim_captions(blocks, fig_boxes)
                 blocks = self._remove_words_in(blocks, fig_boxes)
                 figures = [Figure(bbox=b, image=crop_figure(pre.color, b)) for b in fig_boxes]
             # Tesseract hay bỏ sót dòng chữ nằm sát ảnh: đọc lại các vùng mực chưa được nhận dạng
-            blocks = blocks + self._recover_missed_text(
-                gray, blocks, [f.bbox for f in figures], [t.bbox for t in tables] + [g.bbox for g in grids], text_h)
+            if text_layer is None:
+                blocks = blocks + self._recover_missed_text(
+                    gray, blocks, [f.bbox for f in figures], [t.bbox for t in tables] + [g.bbox for g in grids],
+                    text_h)
 
         elements = self._order_elements(blocks, tables, figures)
         page = build_page(w, h, dpi, elements, source=li.source, page_index=li.page_index)
@@ -146,7 +172,24 @@ class Pipeline:
         return float(median(hs)) if hs else default
 
     # ------------------------------------------------------------------ hình vẽ / ảnh
-    def _find_figures(self, gray: np.ndarray, blocks: List[Block], tables: List[Table], lh: float):
+    @staticmethod
+    def _usable_text_layer(li: LoadedImage):
+        tl = li.pdf_text
+        if tl is None:
+            return None
+        if tl.n_chars < 15 and not tl.image_boxes:
+            return None
+        text = " ".join(p.text for p in tl.paragraphs)
+        if not text.strip():
+            return tl  # trang chỉ có ảnh
+        q = text_quality(text)
+        if q < 0.55:
+            log.info("trang %d: lớp chữ PDF kém (%.2f) -> OCR", li.page_index + 1, q)
+            return None
+        return tl
+
+    def _find_figures(self, gray: np.ndarray, blocks: List[Block], tables: List[Table], lh: float,
+                      extra_boxes: Sequence[BBox] = ()):
         h, w = gray.shape[:2]
         lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
         if lines:
@@ -154,7 +197,7 @@ class Pipeline:
         else:
             content_w = w
 
-        fig_boxes: List[BBox] = []
+        fig_boxes: List[BBox] = list(extra_boxes)
         real_tables: List[Table] = []
         mask = grid_line_mask(gray, lh) if tables else None
         for t in tables:
@@ -234,6 +277,26 @@ class Pipeline:
         return found
 
     @staticmethod
+    def _trim_captions(blocks: List[Block], boxes: List[BBox]) -> List[BBox]:
+        """Dòng 'Hình 2.1. ...' nằm ở mép trên/dưới vùng hình: cắt vùng hình để chú thích vẫn là chữ."""
+        caps = [ln.bbox for b in blocks for p in b.paragraphs for ln in p.lines
+                if ln.words and CAPTION_RE.match(ln.text)]
+        out = []
+        for bx in boxes:
+            l, t, r, btm = bx
+            for cb in caps:
+                if cb[2] <= l or cb[0] >= r or cb[3] <= t or cb[1] >= btm:
+                    continue
+                cy = (cb[1] + cb[3]) / 2
+                if cy > t + 0.65 * (btm - t):
+                    btm = min(btm, cb[1] - 2)
+                elif cy < t + 0.35 * (btm - t):
+                    t = max(t, cb[3] + 2)
+            if btm - t > 10:
+                out.append((l, t, r, btm))
+        return out
+
+    @staticmethod
     def _gap(a, b) -> float:
         dx = max(0, max(a[0], b[0]) - min(a[2], b[2]))
         dy = max(0, max(a[1], b[1]) - min(a[3], b[3]))
@@ -255,7 +318,8 @@ class Pipeline:
         return [b for b in blocks if b.paragraphs]
 
     # ------------------------------------------------------------------ bảng
-    def _extract_tables(self, gray: np.ndarray, blocks: List[Block], grids: List[TableGrid]):
+    def _extract_tables(self, gray: np.ndarray, blocks: List[Block], grids: List[TableGrid],
+                        from_text_layer: bool = False):
         def inside(word: Word, bbox, pad=2) -> bool:
             return bbox[0] - pad <= word.cx <= bbox[2] + pad and bbox[1] - pad <= word.cy <= bbox[3] + pad
 
@@ -285,7 +349,8 @@ class Pipeline:
         for gi, g in enumerate(grids):
             words = table_words[gi]
             lang = choose_lang(" ".join(w.text for w in words), self.engine.langs) if words else self.engine.combined_lang
-            tbl = Table(bbox=g.bbox, row_edges=list(g.row_edges), col_edges=list(g.col_edges))
+            tbl = Table(bbox=g.bbox, row_edges=list(g.row_edges), col_edges=list(g.col_edges),
+                        from_text_layer=from_text_layer)
             self.progress(f"Đọc bảng {gi + 1}/{len(grids)} ({g.n_rows}x{g.n_cols}) ...")
             for gc in g.cells:
                 cell = TableCell(gc.row, gc.col, gc.row_span, gc.col_span, gc.bbox)
@@ -293,7 +358,7 @@ class Pipeline:
                 fallback_lines = self._words_to_lines(cell_words)
                 lines: List[str] = []
                 align_words = cell_words
-                if self.opts.reocr_cells:
+                if self.opts.reocr_cells and not from_text_layer:
                     cell_text = " ".join(w.text for w in cell_words)
                     cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else lang
                     lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
@@ -369,6 +434,8 @@ class Pipeline:
     @staticmethod
     def _order_elements(blocks: List[Block], tables: List[Table], figures: Sequence[Figure] = ()) -> List[Element]:
         paras: List[Paragraph] = [p for b in blocks for p in b.paragraphs if not p.is_empty()]
+        if paras and all(p.lang == "pdf" for p in paras):
+            paras.sort(key=lambda p: (p.top, p.bbox[0]))  # lớp chữ PDF không theo thứ tự đọc
         elements: List[Element] = []
         pending = sorted(list(tables) + list(figures), key=lambda t: t.top)
         for p in paras:

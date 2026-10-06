@@ -89,6 +89,11 @@ class Paragraph:
     space_after_pt: float = 6.0
     line_spacing: float = 1.0
     lang: str = ""
+    fixed_size_pt: Optional[float] = None   # cỡ chữ lấy từ lớp chữ PDF
+    fixed_bold: Optional[bool] = None
+    keep_breaks: bool = False   # giữ đúng ngắt dòng gốc (lớp chữ PDF)
+    italic: bool = False
+    line_pitch_pt: Optional[float] = None  # khoảng cách dòng chính xác (lớp chữ PDF)
 
     @property
     def text(self) -> str:
@@ -144,7 +149,8 @@ class Table:
     cells: List[TableCell] = field(default_factory=list)
     font_size_pt: float = 11.0
     space_after_pt: float = 6.0
-    word_boxes: List[BBox] = field(default_factory=list, repr=False)  # vị trí chữ đã đọc trong bảng
+    word_boxes: List[BBox] = field(default_factory=list, repr=False)
+    from_text_layer: bool = False  # vị trí chữ đã đọc trong bảng
 
     @property
     def n_rows(self) -> int:
@@ -198,6 +204,8 @@ class Page:
     elements: List[Element] = field(default_factory=list)
     source: str = ""
     page_index: int = 0
+    header_text: str = ""   # số trang / tiêu đề chạy ở mép trên -> header Word
+    footer_text: str = ""   # số trang ở mép dưới -> footer Word
 
     @property
     def landscape(self) -> bool:

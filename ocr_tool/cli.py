@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fast-tables", action="store_true", help="không OCR lại từng ô bảng")
     ap.add_argument("--no-figures", action="store_true",
                     help="không nhận diện hình vẽ/ảnh (mặc định: hình được giữ nguyên dạng ảnh)")
+    ap.add_argument("--no-pdf-text", action="store_true",
+                    help="PDF có lớp chữ vẫn OCR từ ảnh (mặc định: đọc trực tiếp lớp chữ, kể cả mã TCVN3)")
     ap.add_argument("--no-spellfix", action="store_true", help="không sửa chính tả tiếng Việt sau OCR")
     ap.add_argument("--dict", metavar="FILE", help="từ điển bổ sung (mỗi dòng: 'sai => đúng' hoặc một từ)")
     ap.add_argument("--psm", type=int, default=3, help="chế độ phân trang Tesseract (mặc định 3)")
@@ -116,7 +118,7 @@ def main(argv: List[str] | None = None) -> int:
         detect_tables=not args.no_tables, reocr_cells=not args.fast_tables,
         refine_blocks=not args.no_refine, refine_lines=not args.no_refine,
         psm=args.psm, pdf_dpi=args.pdf_dpi, progress=lambda m: print("  " + m),
-        detect_figures=not args.no_figures, spellfix=not args.no_spellfix,
+        detect_figures=not args.no_figures, spellfix=not args.no_spellfix, use_pdf_text=not args.no_pdf_text,
     )
     if args.dict:
         from .spellfix import get_lexicon

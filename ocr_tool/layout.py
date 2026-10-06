@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from statistics import median
 from typing import List, Optional, Tuple
 
@@ -32,9 +33,29 @@ def build_page(width_px: int, height_px: int, dpi: Optional[float], elements: Li
     page = Page(width_px=width_px, height_px=height_px, dpi=eff_dpi,
                 page_width_in=pw, page_height_in=ph, elements=elements,
                 source=source, page_index=page_index)
+    _extract_page_number(page)
     _compute_margins(page)
     _style_elements(page)
     return page
+
+
+_PAGE_NO = re.compile(r"^\s*[-–]?\s*\d{1,4}\s*[-–]?\s*$")
+
+
+def _extract_page_number(page: Page) -> None:
+    """Số trang ở mép trên/dưới trang -> header/footer của Word (không chiếm chỗ trong thân trang)."""
+    keep = []
+    for el in page.elements:
+        if isinstance(el, Paragraph) and not el.is_empty() and _PAGE_NO.match(el.text) and len(el.lines) == 1:
+            b = el.bbox
+            if b[3] < 0.1 * page.height_px and not page.header_text:
+                page.header_text = el.text.strip()
+                continue
+            if b[1] > 0.9 * page.height_px and not page.footer_text:
+                page.footer_text = el.text.strip()
+                continue
+        keep.append(el)
+    page.elements = keep
 
 
 def _content_bbox(page: Page) -> Optional[BBox]:
@@ -61,7 +82,8 @@ def _compute_margins(page: Page) -> None:
     b = page.page_height_in - page.px_to_in(cb[3])
     clamp = lambda v, lo, hi: max(lo, min(hi, v))
     page.margin_left_in = clamp(l, 0.4, 1.6)
-    page.margin_right_in = clamp(r, 0.4, 1.6)
+    # chừa thêm ~0.15" bề ngang: phông thay thế rộng hơn chút sẽ không làm xuống dòng thừa
+    page.margin_right_in = clamp(r - 0.15, 0.3, 1.6)
     page.margin_top_in = clamp(t, 0.4, 1.6)
     page.margin_bottom_in = clamp(b, 0.4, 1.6)
 
@@ -117,8 +139,9 @@ def _style_elements(page: Page) -> None:
     if not paras:
         return
     base_h = float(median(heights))
-    base_pt = float(median([_font_size_pt(page, p) for p in paras]))
+    base_pt = float(median([p.fixed_size_pt or _font_size_pt(page, p) for p in paras]))
 
+    pdf_pitch_ratio = _page_pdf_pitch_ratio(page, paras)
     content = _content_bbox(page)
     cL, cR = content[0], content[2]
     content_w = max(1, cR - cL)
@@ -147,13 +170,15 @@ def _style_elements(page: Page) -> None:
             continue
         p = el
         lh = p.median_line_height or base_h
-        p.font_size_pt = _font_size_pt(page, p)
+        p.font_size_pt = p.fixed_size_pt if p.fixed_size_pt else _font_size_pt(page, p)
         # tiêu đề: chữ lớn hơn hẳn hoặc ngắn và toàn chữ in
         text = p.text
         letters = [c for c in text if c.isalpha()]
         upper_ratio = (sum(c.isupper() for c in letters) / len(letters)) if letters else 0
         p.bold = (p.font_size_pt >= base_pt * 1.25 and len(p.lines) <= 3) or \
                  (upper_ratio > 0.9 and len(letters) >= 4 and len(p.lines) <= 2)
+        if p.fixed_bold is not None:
+            p.bold = p.fixed_bold
 
         ref = p.block_bbox or p.bbox
         bL, bR = ref[0], ref[2]
@@ -172,7 +197,11 @@ def _style_elements(page: Page) -> None:
         else:
             p.left_indent_in = 0.0
             p.first_line_indent_in = 0.0
-        p.line_spacing = _line_spacing(p, lh)
+        if p.fixed_size_pt:
+            p.line_spacing = _pdf_line_spacing(page, p, pdf_pitch_ratio)
+            p.line_pitch_pt = round(max(p.fixed_size_pt, p.line_spacing * 1.15 * p.fixed_size_pt), 1)
+        else:
+            p.line_spacing = _line_spacing(p, lh)
         p.space_after_pt = _space_after(page, pb[3], nxt, lh)
 
 
@@ -186,7 +215,9 @@ def _alignment(p: Paragraph, bL: int, bR: int, cL: int, cR: int, page_cx: float,
     width = pb[2] - pb[0]
     centers = [(l + r) / 2 for l, r in zip(lefts, rights)]
     # Canh giữa: mọi dòng có tâm gần tâm trang (hoặc tâm vùng nội dung) và không chiếm hết bề ngang
-    if width < 0.9 * content_w and min(lefts) - cL > tol and cR - max(rights) > tol:
+    if width < 0.8 * content_w and min(lefts) - cL > tol and cR - max(rights) > tol:
+        if len(lines) == 1:
+            tol = min(tol, max(lh * 0.6, 0.012 * content_w))  # dòng đơn: chỉ coi là giữa khi thật sự cân
         cands = [page_cx, (cL + cR) / 2]
         if (bR - bL) - width > 2 * tol:  # khối rộng hơn hẳn đoạn (vd. cột)
             cands.append((bL + bR) / 2)
@@ -208,6 +239,26 @@ def _alignment(p: Paragraph, bL: int, bR: int, cL: int, cR: int, page_cx: float,
                 all(abs(r - bR) <= tol for r in body_rights) and (bR - bL) > 0.5 * content_w:
             return "justify"
     return "left"
+
+
+def _pitch_ratio(page: Page, p: Paragraph) -> Optional[float]:
+    lines = [ln for ln in p.lines if ln.words]
+    tops = [ln.bbox[1] for ln in lines]
+    pitches = [b - a for a, b in zip(tops, tops[1:]) if b > a]
+    if not pitches or not p.fixed_size_pt:
+        return None
+    # Word: giãn dòng "single" của Times New Roman ~ 1.15 x cỡ chữ
+    return page.px_to_pt(median(pitches)) / (1.15 * p.fixed_size_pt)
+
+
+def _page_pdf_pitch_ratio(page: Page, paras: List[Paragraph]) -> float:
+    rs = [r for r in (_pitch_ratio(page, p) for p in paras) if r]
+    return float(median(rs)) if rs else 1.0
+
+
+def _pdf_line_spacing(page: Page, p: Paragraph, default: float) -> float:
+    r = _pitch_ratio(page, p) or default
+    return round(max(0.8, min(3.0, r)), 2)
 
 
 def _line_spacing(p: Paragraph, lh: float) -> float:

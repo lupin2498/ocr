@@ -20,14 +20,15 @@ class LoadedImage:
     dpi: Optional[float]
     source: str
     page_index: int = 0
+    pdf_text: Optional[object] = None  # pdftext.PdfPageText nếu PDF có lớp chữ
 
 
-def load_inputs(path: str, pdf_dpi: int = 300) -> List[LoadedImage]:
+def load_inputs(path: str, pdf_dpi: int = 300, use_pdf_text: bool = True) -> List[LoadedImage]:
     """Đọc ảnh hoặc PDF (mỗi trang PDF -> 1 ảnh). Dùng PIL để hỗ trợ đường dẫn Unicode."""
     p = Path(path)
     ext = p.suffix.lower()
     if ext in PDF_EXTS:
-        return _load_pdf(p, pdf_dpi)
+        return _load_pdf(p, pdf_dpi, use_pdf_text)
     if ext == ".tif" or ext == ".tiff" or ext == ".gif":
         return _load_multiframe(p)
     with Image.open(p) as im:
@@ -48,7 +49,7 @@ def _load_multiframe(p: Path) -> List[LoadedImage]:
     return out
 
 
-def _load_pdf(p: Path, dpi: int) -> List[LoadedImage]:
+def _load_pdf(p: Path, dpi: int, use_pdf_text: bool = True) -> List[LoadedImage]:
     try:
         import pymupdf as fitz  # type: ignore
     except ImportError:  # pragma: no cover
@@ -63,7 +64,14 @@ def _load_pdf(p: Path, dpi: int) -> List[LoadedImage]:
             arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
         elif pix.n == 4:
             arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-        out.append(LoadedImage(np.ascontiguousarray(arr), float(dpi), str(p), i))
+        li = LoadedImage(np.ascontiguousarray(arr), float(dpi), str(p), i)
+        if use_pdf_text:
+            try:
+                from .pdftext import extract_page
+                li.pdf_text = extract_page(page, zoom)
+            except Exception:  # noqa: BLE001 - lớp chữ hỏng thì OCR như bình thường
+                li.pdf_text = None
+        out.append(li)
     doc.close()
     return out
 

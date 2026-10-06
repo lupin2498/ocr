@@ -21,10 +21,12 @@ _ALIGN = {
 }
 
 
-def _set_run_font(run, name: str, size_pt: float, bold: bool = False) -> None:
+def _set_run_font(run, name: str, size_pt: float, bold: bool = False, italic: bool = False) -> None:
     run.font.name = name
     run.font.size = Pt(size_pt)
     run.font.bold = bold
+    if italic:
+        run.font.italic = True
     rpr = run._element.get_or_add_rPr()
     rfonts = rpr.find(qn("w:rFonts"))
     if rfonts is None:
@@ -75,6 +77,7 @@ class DocxExporter:
         for i, page in enumerate(pages):
             section = doc.sections[0] if i == 0 else doc.add_section()
             self._setup_section(section, page)
+            self._write_header_footer(section, page)
             self._write_page(doc, page)
         doc.save(out_path)
         return out_path
@@ -87,6 +90,18 @@ class DocxExporter:
         section.right_margin = Inches(page.margin_right_in)
         section.top_margin = Inches(page.margin_top_in)
         section.bottom_margin = Inches(page.margin_bottom_in)
+        section.header_distance = Inches(max(0.2, min(0.5, page.margin_top_in - 0.35)))
+        section.footer_distance = Inches(max(0.2, min(0.5, page.margin_bottom_in - 0.35)))
+
+    def _write_header_footer(self, section, page: Page) -> None:
+        for part, text in ((section.header, page.header_text), (section.footer, page.footer_text)):
+            part.is_linked_to_previous = False
+            para = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
+            for r in list(para.runs):
+                r._element.getparent().remove(r._element)
+            if text:
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                _set_run_font(para.add_run(text), self.font_name, 12)
 
     def _write_page(self, doc, page: Page) -> None:
         if not page.elements:
@@ -109,17 +124,30 @@ class DocxExporter:
             pf.first_line_indent = Inches(max(-1.0, min(1.5, p.first_line_indent_in)))
         pf.space_after = Pt(p.space_after_pt)
         pf.space_before = Pt(0)
-        pf.line_spacing = p.line_spacing
+        if p.line_pitch_pt:
+            pf.line_spacing = Pt(p.line_pitch_pt)  # "Exactly" như bản gốc -> trang không bị tràn
+        else:
+            pf.line_spacing = p.line_spacing
         lines = [ln.text for ln in p.lines if not ln.is_empty()]
+        # tab stop tại vị trí cột thứ hai (dòng "nhãn: <tab> giá trị" trong PDF)
+        for ln in p.lines:
+            for wd in ln.words:
+                if wd.text.startswith("\t"):
+                    x_in = page.px_to_in(wd.left) - page.margin_left_in - (pf.left_indent.inches if pf.left_indent else 0)
+                    if x_in > 0.1:
+                        try:
+                            pf.tab_stops.add_tab_stop(Inches(round(x_in, 2)))
+                        except ValueError:
+                            pass
         if self.keep_line_breaks:
             for k, text in enumerate(lines):
                 run = para.add_run(text)
-                _set_run_font(run, self.font_name, p.font_size_pt, p.bold)
+                _set_run_font(run, self.font_name, p.font_size_pt, p.bold, p.italic)
                 if k < len(lines) - 1:
                     run.add_break(WD_BREAK.LINE)
         else:
-            run = para.add_run(_join_lines(lines))
-            _set_run_font(run, self.font_name, p.font_size_pt, p.bold)
+            run = para.add_run(_join_lines(lines).replace(" \t", "\t"))
+            _set_run_font(run, self.font_name, p.font_size_pt, p.bold, p.italic)
 
     def _write_figure(self, doc, page: Page, f: Figure) -> None:
         import io
@@ -143,6 +171,11 @@ class DocxExporter:
         width_in = page.px_to_in(f.bbox[2] - f.bbox[0])
         max_w = page.page_width_in - page.margin_left_in - page.margin_right_in
         width_in = max(0.3, min(width_in, max_w - f.left_indent_in))
+        # không vượt chiều cao vùng in (tránh tràn sang trang sau)
+        max_h = page.page_height_in - page.margin_top_in - page.margin_bottom_in - 0.35
+        h_px, w_px = img.shape[:2]
+        if w_px and width_in * h_px / w_px > max_h > 0:
+            width_in = max_h * w_px / h_px
         para = doc.add_paragraph()
         para.alignment = _ALIGN.get(f.alignment, WD_ALIGN_PARAGRAPH.CENTER)
         pf = para.paragraph_format
@@ -168,6 +201,14 @@ class DocxExporter:
             ind.set(qn("w:type"), "dxa")
             tbl_pr.append(ind)
         col_widths = [page.px_to_in(t.col_edges[c + 1] - t.col_edges[c]) for c in range(t.n_cols)]
+        # lưới cột (w:tblGrid) – Word/LibreOffice dùng giá trị này để dàn cột
+        grid = table._tbl.tblGrid
+        for gc, w_in in zip(grid.findall(qn("w:gridCol")), col_widths):
+            gc.set(qn("w:w"), str(int(w_in * 1440)))
+        tbl_pr = table._tbl.tblPr
+        layout = OxmlElement("w:tblLayout")
+        layout.set(qn("w:type"), "fixed")
+        tbl_pr.append(layout)
         for c, w_in in enumerate(col_widths):
             for r in range(t.n_rows):
                 table.cell(r, c).width = Inches(w_in)

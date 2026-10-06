@@ -77,6 +77,7 @@ ocr2word.bat --check
 | `--denoise`, `--binarize`, `--no-deskew` | tuỳ chọn tiền xử lý cho ảnh chụp kém |
 | `--psm N` | chế độ phân trang Tesseract (3 = tự động, 4 = cột đơn, 6 = khối đều) |
 | `--txt` | xuất thêm file `.txt` |
+| `--no-pdf-text` | PDF có lớp chữ vẫn OCR từ ảnh (mặc định: đọc trực tiếp lớp chữ) |
 | `--no-figures` | không nhận diện hình (mặc định hình được giữ nguyên dạng ảnh) |
 | `--no-spellfix` | không sửa chính tả tiếng Việt |
 | `--dict FILE` | từ điển bổ sung (`sai => đúng` hoặc một từ mỗi dòng) |
@@ -98,7 +99,29 @@ ocr2word.bat --check
 * Các dòng có độ tin cậy thấp được OCR lại với từng ngôn ngữ và giữ kết quả tốt nhất.
 * Ô bảng được OCR riêng từng ô (loại bỏ ảnh hưởng của đường kẻ).
 
-## 4. Sửa chính tả tiếng Việt sau OCR
+## 4. PDF có sẵn lớp chữ (kể cả phông TCVN3 .VnTime)
+
+Nhiều tài liệu kỹ thuật là PDF xuất từ Word (không phải bản scan). Khi đó chương trình **đọc trực tiếp lớp chữ**
+thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần như tuyệt đối:
+
+* Tự nhận chữ mã **TCVN3/ABC** (phông `.VnTime`, `.VnTimeH`) và đổi sang Unicode; khôi phục chữ "ư" mà
+  phông cũ xuất thành dấu gạch (`đ-ợc` → `được`), chữ hoa của phông `...H`.
+* Bảng lấy theo **đường kẻ vector** trong PDF (đúng số hàng/cột, kể cả đường kẻ rất mảnh).
+* **Ảnh nhúng** trong PDF được chèn nguyên vào Word; hình đặt ngang trang (chú thích chữ dọc) giữ nguyên làm ảnh.
+* Cỡ chữ, chữ đậm/nghiêng, cột canh bằng tab, khoảng cách dòng lấy từ PDF; số trang đưa vào header/footer.
+* Trang PDF không có lớp chữ (scan) vẫn được OCR như bình thường. Tắt bằng `--no-pdf-text`.
+
+### Kinh nghiệm rút ra khi đối chiếu với bản gốc TB2-117A
+
+| Lỗi trong bản OCR cũ | Nguyên nhân | Cách khắc phục |
+|---|---|---|
+| `đ-ợc`, `tr- ớc`, `Ch- ơng`, `C¥`/`CY` | PDF gốc dùng phông .VnTime: chữ "ư" hiển thị thành dấu gạch, "Ơ" thành ký tự ¥ ngay trên trang | đọc lớp chữ TCVN3 rồi giải mã; với bản scan dùng bộ khôi phục "ư" |
+| Bảng dồn hết vào một ô, cột sai độ rộng | đường kẻ bảng 0,5pt quá mảnh; Word dùng lưới cột mặc định | lấy đường kẻ vector; ghi độ rộng cột vào `tblGrid`, bố cục cố định |
+| Hình vẽ OCR ra ký tự rác, chú thích hình bị nuốt | hình là ảnh nhúng, chú thích có khi xoay dọc | lấy vị trí ảnh nhúng, gộp chú thích xoay vào ảnh, giữ "Hình …" là chữ |
+| `kG/cm”`, `TB2-I17A`, ký tự `|` trong bảng | lỗi nhận dạng có quy luật | bước làm sạch sau OCR (`ocr_cleanup.py`) |
+| Trang Word bị tràn | giãn dòng/khoảng cách đoạn không khớp; số trang chiếm chỗ | giãn dòng chính xác theo PDF, số trang vào footer, chừa thêm bề ngang |
+
+## 5. Sửa chính tả tiếng Việt sau OCR
 
 Sau khi OCR, chương trình tự sửa chính tả cho các đoạn tiếng Việt (tiếng Anh, tiếng Nga, số liệu, ký hiệu
 kỹ thuật như `TB2-117A`, `Mi-8`, `ĐC`, `TBMN` được giữ nguyên):
@@ -114,7 +137,7 @@ kỹ thuật như `TB2-117A`, `Mi-8`, `ĐC`, `TBMN` được giữ nguyên):
   từ/cụm từ là thuật ngữ cần giữ nguyên và dùng làm ngữ cảnh.
 * Tắt bằng bỏ chọn *Sửa chính tả tiếng Việt* hoặc `--no-spellfix`.
 
-## 5. Hình vẽ và ảnh được giữ nguyên
+## 6. Hình vẽ và ảnh được giữ nguyên
 
 Chương trình tự nhận diện vùng **hình vẽ kỹ thuật, sơ đồ, ảnh chụp** trên trang và chèn **nguyên ảnh** vào
 file Word (đúng vị trí, đúng kích thước, canh giữa nếu hình nằm giữa trang) thay vì OCR ra ký tự rác:
@@ -126,7 +149,7 @@ file Word (đúng vị trí, đúng kích thước, canh giữa nếu hình nằ
 * Dòng chữ Tesseract bỏ sót cạnh ảnh được đọc bổ sung.
 * Tắt bằng bỏ chọn *Nhận diện hình vẽ/ảnh* hoặc `--no-figures`.
 
-## 6. Bố cục được tái tạo
+## 7. Bố cục được tái tạo
 
 * Khổ giấy theo DPI của ảnh (hoặc A4 dọc / ngang), lề theo vùng chữ thật.
 * Canh trái / giữa / phải / đều hai bên, thụt đầu dòng, thụt cả đoạn, khoảng cách đoạn, giãn dòng.
@@ -134,7 +157,7 @@ file Word (đúng vị trí, đúng kích thước, canh giữa nếu hình nằ
 * Bảng: số hàng / cột, độ rộng cột, chiều cao hàng, ô gộp, canh lề trong ô, vị trí bảng trong trang.
 * PDF / TIFF nhiều trang → mỗi trang một section, đúng hướng giấy.
 
-## 7. Cấu trúc mã nguồn
+## 8. Cấu trúc mã nguồn
 
 ```
 ocr_tool/
@@ -145,6 +168,9 @@ ocr_tool/
   figures.py      nhận diện hình vẽ / ảnh, giữ nguyên ảnh
   spellfix.py     sửa chính tả tiếng Việt sau OCR (khôi phục "ư", từ điển + ngữ cảnh tài liệu)
   vnsyllable.py   kiểm tra âm tiết tiếng Việt hợp lệ
+  pdftext.py      đọc lớp chữ PDF (Unicode/TCVN3), đường kẻ bảng vector, ảnh nhúng
+  legacy_encoding.py  bảng mã TCVN3 -> Unicode
+  ocr_cleanup.py  làm sạch lỗi OCR có quy luật (kG/cm2, mã hiệu, ký tự kẻ bảng)
   data/           từ điển âm tiết (từ FrequencyWords, CC BY-SA 4.0), từ ghép, từ điển bổ sung
   layout.py       suy ra khổ giấy, lề, canh lề, cỡ chữ, giãn cách
   pipeline.py     nối các bước, tách chữ trong bảng khỏi văn bản, thứ tự đọc
@@ -155,7 +181,7 @@ tests/            kiểm thử đầu-cuối với ảnh mẫu 3 ngôn ngữ + b
 
 Chạy kiểm thử: `pip install -r requirements-dev.txt && python -m pytest tests`.
 
-## 8. Mẹo để kết quả tốt
+## 9. Mẹo để kết quả tốt
 
 * Scan / chụp ≥ 300 dpi, chữ rõ, không lệch quá 10°; ảnh nhỏ được tự phóng to.
 * Chỉ bật các ngôn ngữ thực sự có trong tài liệu.
