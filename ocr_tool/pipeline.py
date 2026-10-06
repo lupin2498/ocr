@@ -66,11 +66,23 @@ class Pipeline:
         else:
             for li in iter_inputs(path, pdf_dpi=self.opts.pdf_dpi, use_pdf_text=self.opts.use_pdf_text):
                 self.progress(f"Trang {li.page_index + 1}/{n} của {li.source}")
-                pages.append(self.process_image(li, fix_spelling=False))
+                pages.append(self.process_image_safe(li))
                 del li
         strip_running_headers(pages)
         self.fix_spelling(pages)
         return pages
+
+    def process_image_safe(self, li: LoadedImage) -> Page:
+        """Xử lý một trang; nếu lỗi bất ngờ thì giữ nguyên ảnh cả trang thay vì dừng cả tài liệu."""
+        try:
+            return self.process_image(li, fix_spelling=False)
+        except Exception as e:  # noqa: BLE001
+            log.exception("trang %d lỗi, giữ nguyên ảnh trang", li.page_index + 1)
+            self.progress(f"Trang {li.page_index + 1}: lỗi xử lý ({e}) – giữ nguyên ảnh trang")
+            img = li.image
+            h, w = img.shape[:2]
+            return build_page(w, h, li.dpi, [Figure(bbox=(0, 0, w, h), image=img.copy())],
+                              source=li.source, page_index=li.page_index)
 
     def _n_workers(self, n_pages: int) -> int:
         if n_pages < 3:
@@ -536,7 +548,7 @@ def _worker_init(opts: Options) -> None:
 def _worker_page(path: str, index: int) -> Page:
     from .preprocess import render_pdf_page
     li = render_pdf_page(path, index, _WORKER_PIPE.opts.pdf_dpi, _WORKER_PIPE.opts.use_pdf_text)
-    return _WORKER_PIPE.process_image(li, fix_spelling=False)
+    return _WORKER_PIPE.process_image_safe(li)
 
 
 def _norm_key(text: str) -> str:

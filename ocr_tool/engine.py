@@ -77,7 +77,14 @@ class TesseractEngine:
 
     def image_to_words(self, img: np.ndarray, lang: str, psm: int) -> List[Tuple[Tuple[int, int, int], Word]]:
         """Trả về [(khoá (block, par, line), Word)] theo thứ tự đọc của Tesseract."""
-        data = pytesseract.image_to_data(img, lang=lang, config=self._config(psm), output_type=Output.DICT)
+        if img is None or img.size == 0 or min(img.shape[:2]) < 6:
+            return []
+        try:
+            data = pytesseract.image_to_data(img, lang=lang, config=self._config(psm), output_type=Output.DICT)
+        except (pytesseract.TesseractError, RuntimeError, OSError) as e:
+            # Tesseract đôi khi lỗi (vd. SIGFPE -8) trên vùng ảnh lạ: bỏ qua vùng đó, không làm hỏng cả tài liệu
+            log.warning("Tesseract lỗi trên vùng %s (%s, psm %d): %s", img.shape, lang, psm, e)
+            return []
         out = []
         n = len(data["text"])
         for i in range(n):
