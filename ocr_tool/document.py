@@ -135,6 +135,7 @@ class TableCell:
     lines: List[str] = field(default_factory=list)
     alignment: str = "left"
     bold: bool = False
+    words: List[Word] = field(default_factory=list, repr=False)  # từ (toạ độ trang) đã đọc trong ô
 
     @property
     def text(self) -> str:

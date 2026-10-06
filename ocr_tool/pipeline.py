@@ -61,6 +61,7 @@ class Pipeline:
         for li in images:
             self.progress(f"Trang {li.page_index + 1}/{len(images)} của {li.source}")
             pages.append(self.process_image(li, fix_spelling=False))
+        strip_running_headers(pages)
         self.fix_spelling(pages)
         return pages
 
@@ -202,6 +203,13 @@ class Pipeline:
         mask = grid_line_mask(gray, lh) if tables else None
         for t in tables:
             cell_texts = [c.text for c in t.cells]
+            grid_n = max(1, t.n_rows * t.n_cols)
+            if not t.from_text_layer and t.n_rows * t.n_cols >= 6 and \
+                    (len(t.cells) < 0.45 * grid_n or (t.n_rows >= 3 and t.n_cols >= 3 and self._has_empty_edge(t))):
+                # lưới bị gộp quá nhiều: khung bao + nét vẽ bên trong, không phải bảng
+                log.info("bảng %s bị loại (gộp ô %d/%d) – xử lý như khung/hình", t.bbox, len(t.cells), grid_n)
+                self._restore_table_words(blocks, t)
+                continue
             if table_is_figure(gray, t.bbox, mask, t.word_boxes, cell_texts, lh):
                 log.info("bảng %s được coi là hình vẽ", t.bbox)
                 fig_boxes.append(t.bbox)
@@ -275,6 +283,45 @@ class Pipeline:
                     blk.lang = self.engine.combined_lang
                     found.append(blk)
         return found
+
+    @staticmethod
+    def _has_empty_edge(t: Table) -> bool:
+        """Cột/hàng mép toàn ô trống (chỉ trừ các ô trải hết bề ngang/dọc) = lề trong một khung, không phải bảng."""
+        for col in (0, t.n_cols - 1):
+            cs = [c for c in t.cells if c.col <= col < c.col + c.col_span and c.col_span < t.n_cols]
+            if cs and all(not any(ch.isalnum() for ch in c.text) for c in cs):
+                return True
+        for row in (0, t.n_rows - 1):
+            cs = [c for c in t.cells if c.row <= row < c.row + c.row_span and c.row_span < t.n_rows]
+            if cs and all(not any(ch.isalnum() for ch in c.text) for c in cs):
+                return True
+        return False
+
+    @staticmethod
+    def _restore_table_words(blocks: List[Block], t: Table) -> None:
+        """Trả chữ của 'bảng' bị loại về thành đoạn văn, giữ nguyên toạ độ từ đã OCR trong ô."""
+        for c in sorted(t.cells, key=lambda c: (c.bbox[1], c.bbox[0])):
+            if not c.text.strip():
+                continue
+            words = sorted(c.words, key=lambda w: (w.cy, w.left))
+            lines: List[Line] = []
+            for wd in words:
+                if lines and abs(wd.cy - lines[-1].words[-1].cy) < 0.6 * max(wd.height, lines[-1].words[-1].height):
+                    lines[-1].words.append(wd)
+                else:
+                    lines.append(Line([wd]))
+            for ln in lines:
+                ln.words.sort(key=lambda w: w.left)
+            if len(c.text.strip()) <= 2 and len(lines) <= 1:
+                continue  # mảnh nhiễu trong lề khung
+            if lines:
+                # thay chữ theo kết quả OCR lại của ô (chính xác hơn), giữ toạ độ dòng
+                texts = [x for x in c.lines if x.strip()]
+                if len(texts) == len(lines):
+                    for ln, txt in zip(lines, texts):
+                        b = ln.bbox
+                        ln.words = [Word(txt, b[0], b[1], b[2] - b[0], b[3] - b[1], ln.conf)]
+                blocks.append(Block([Paragraph(lines=lines)]))
 
     @staticmethod
     def _trim_captions(blocks: List[Block], boxes: List[BBox]) -> List[BBox]:
@@ -370,6 +417,7 @@ class Pipeline:
                 cell.lines = lines
                 cell.alignment = self._cell_alignment(align_words, gc.bbox)
                 tbl.word_boxes.extend(wd.bbox for wd in align_words)
+                cell.words = list(align_words)
                 tbl.cells.append(cell)
             tables.append(tbl)
         return blocks, tables
@@ -444,6 +492,61 @@ class Pipeline:
             elements.append(p)
         elements.extend(pending)
         return elements
+
+
+def _norm_key(text: str) -> str:
+    import unicodedata as _ud
+    t = _ud.normalize("NFD", text.lower())
+    t = "".join(c for c in t if c.isalpha() and _ud.category(c) != "Mn")
+    return t
+
+
+def strip_running_headers(pages: List[Page]) -> None:
+    """Tiêu đề chạy / chân trang lặp lại trên nhiều trang (tên sách, tên chương, hoa văn) -> bỏ khỏi thân
+    trang (số trang giữ ở header/footer). Mảnh chữ rác ở mép trang cũng bị loại."""
+    import difflib
+
+    if len(pages) < 4:
+        return
+    cands = []  # (page_idx, element, key, zone)
+    for i, pg in enumerate(pages):
+        for el in pg.elements:
+            if not isinstance(el, Paragraph) or el.is_empty() or el.lang == "pdf":
+                continue
+            b = el.bbox
+            zone = "top" if b[3] < 0.10 * pg.height_px else ("bottom" if b[1] > 0.90 * pg.height_px else None)
+            if zone is None or len(el.lines) > 3 or len(el.text) > 80:
+                continue
+            cands.append((i, el, _norm_key(el.text), zone))
+    if not cands:
+        return
+    need = max(3, int(0.15 * len(pages)))
+    remove = set()
+    for idx, (i, el, key, zone) in enumerate(cands):
+        if len(key) < 4:
+            continue
+        hits = {i}
+        for j, el2, key2, zone2 in cands:
+            if j in hits or zone2 != zone or len(key2) < 4:
+                continue
+            if difflib.SequenceMatcher(None, key, key2).ratio() >= 0.6:
+                hits.add(j)
+        if len(hits) >= need:
+            remove.add(id(el))
+    for i, pg in enumerate(pages):
+        keep = []
+        for el in pg.elements:
+            if id(el) in remove:
+                continue
+            if isinstance(el, Paragraph) and el.lang != "pdf" and not el.is_empty():
+                b = el.bbox
+                edge = b[3] < 0.08 * pg.height_px or b[1] > 0.92 * pg.height_px
+                if edge and len(el.text) < 40 and text_quality(el.text, el.conf) < 0.4:
+                    continue  # mảnh rác ở mép trang (hoa văn, viền)
+            keep.append(el)
+        if len(keep) != len(pg.elements):
+            log.info("trang %d: bỏ %d dòng tiêu đề chạy / rác ở mép", i + 1, len(pg.elements) - len(keep))
+        pg.elements = keep
 
 
 def process_files(paths: Sequence[str], opts: Options) -> List[Page]:

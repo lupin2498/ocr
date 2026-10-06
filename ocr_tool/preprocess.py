@@ -144,6 +144,22 @@ def deskew(gray: np.ndarray, max_angle: float = 10.0) -> Tuple[np.ndarray, float
     return rotated, angle
 
 
+def flatten_background(gray: np.ndarray) -> np.ndarray:
+    """Ảnh scan/photocopy nền xám hoặc sáng không đều: chia cho nền ước lượng -> nền trắng, chữ giữ độ đậm.
+    Ảnh nền đã trắng (PDF dựng hình, scan sạch) thì giữ nguyên."""
+    small = cv2.resize(gray, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+    bright = np.percentile(small, 90)
+    spread = np.percentile(small, 90) - np.percentile(small, 60)
+    if bright >= 240 and spread < 12:
+        return gray
+    k = max(15, int(min(small.shape[:2]) * 0.05) | 1)
+    bg = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    bg = cv2.GaussianBlur(bg, (0, 0), k / 3)
+    bg = cv2.resize(bg, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_LINEAR)
+    out = cv2.divide(gray, np.maximum(bg, 1), scale=255)
+    return out
+
+
 def denoise(gray: np.ndarray) -> np.ndarray:
     return cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
 
@@ -179,6 +195,7 @@ def preprocess(img: np.ndarray, do_deskew: bool = True, do_denoise: bool = False
             color = cv2.warpAffine(color, m, (w, h), flags=cv2.INTER_CUBIC,
                                    borderMode=cv2.BORDER_CONSTANT,
                                    borderValue=(255, 255, 255))
+    gray = flatten_background(gray)
     if do_denoise:
         gray = denoise(gray)
     if do_binarize:

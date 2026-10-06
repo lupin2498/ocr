@@ -287,7 +287,8 @@ class SpellFixer:
         return self.prior(c) + 3.5 * math.log1p(self.ctx(prev, c, nxt)) - 3.0 * cost
 
     # ------------------------------------------------------------ sửa một âm tiết
-    def fix_syllable(self, w_orig: str, prev: str, nxt: str, heading: bool) -> str:
+    def fix_syllable(self, w_orig: str, prev: str, nxt: str, heading: bool,
+                     prev2: str = "", nxt2: str = "") -> str:
         w = w_orig.lower()
         if w in self.lex.keep:
             return w_orig
@@ -304,13 +305,32 @@ class SpellFixer:
             # (ví dụ "may nén" -> "máy nén", "Ô đỡ" -> "Ổ đỡ")
             if not prev and not nxt:
                 return w_orig
-            own_l, own_r = self.ctx(prev, w, ""), self.ctx("", w, nxt)
+            # Từ điển từ ghép (đã kiểm duyệt) thắng thống kê của tài liệu: lỗi OCR lặp lại có hệ thống
+            # (phông chữ làm "chi phí" luôn thành "chỉ phí") khiến tài liệu "học" luôn cái sai.
+            comp = self.lex.compounds
+            # từ bên cạnh đã thuộc từ ghép khác ("bắt đầu" từ, "bản đồ") thì không ghép với nó nữa
+            prev_free = bool(prev) and comp.get((prev2, prev), 0) == 0
+            nxt_free = bool(nxt) and comp.get((nxt, nxt2), 0) == 0
+            if comp.get((prev, w), 0) == 0 and comp.get((w, nxt), 0) == 0 and self.lex.count(w) < 150_000:
+                for c, _cost in self.candidates(w, allow_edit=False):
+                    if c in (prev, nxt):
+                        continue
+                    if (prev_free and comp.get((prev, c), 0) > 0) or (nxt_free and comp.get((c, nxt), 0) > 0):
+                        return self._apply(w_orig, c)
+            if (prev_free and comp.get((prev, w), 0) > 0) or (nxt_free and comp.get((w, nxt), 0) > 0):
+                return w_orig  # đã khớp từ ghép trong từ điển: không đổi theo thống kê tài liệu
+            # ngữ cảnh: bỏ phần từ ghép ở phía từ bên cạnh đã thuộc từ ghép khác
+            def side_ctx(c: str) -> Tuple[int, int]:
+                cl = self.doc.bigram.get((prev, c), 0) + (comp.get((prev, c), 0) if prev_free else 0) if prev else 0
+                cr = self.doc.bigram.get((c, nxt), 0) + (comp.get((c, nxt), 0) if nxt_free else 0) if nxt else 0
+                return cl, cr
+            own_l, own_r = side_ctx(w)
             own = own_l + own_r
             best, best_ctx, best_l, best_r = None, 0, 0, 0
             for c, _cost in self.candidates(w, allow_edit=False):
                 if c == prev or c == nxt:
                     continue  # tránh tạo từ lặp "động động"
-                cl, cr = self.ctx(prev, c, ""), self.ctx("", c, nxt)
+                cl, cr = side_ctx(c)
                 if cl + cr > best_ctx:
                     best, best_ctx, best_l, best_r = c, cl + cr, cl, cr
             if not best:
@@ -358,6 +378,19 @@ class SpellFixer:
             self.changes[(src, out)] += 1
         return out
 
+    # ------------------------------------------------------------ cặp hay nhầm có luật riêng
+    _DE_PREV = {"vấn", "chủ", "tiêu", "đầu", "mệnh", "nan", "luận", "đáp", "giải", "đặt", "nêu", "câu",
+                "bàn", "nhan", "chuyên", "đối"}
+    _DE_NEXT = {"nghị", "xuất", "cập", "tài", "ra", "án", "cương", "phòng", "bạt", "cao", "thi", "bài", "mục",
+                "tựa", "kháng", "đạt", "can", "cử", "từ", "hình", "lao", "nghi", "pa", "tặng", "ốc"}
+
+    def confusion_rule(self, w_orig: str, prev: str, nxt: str) -> Optional[str]:
+        w = w_orig.lower()
+        if w == "đề" and prev not in self._DE_PREV and nxt not in self._DE_NEXT and nxt and \
+                self.lex.compounds.get((prev, "đề"), 0) == 0 and self.lex.compounds.get(("đề", nxt), 0) == 0:
+            return self._apply(w_orig, "để")
+        return None
+
     # ------------------------------------------------------------ sửa một dòng
     def fix_tokens(self, tokens: Sequence[str], heading: bool = False) -> List[str]:
         parts = []
@@ -376,7 +409,9 @@ class SpellFixer:
                 continue  # mảnh vỡ của từ bị gạch (Í- ợng): không đoán
             prev = cores[i - 1] if i > 0 and not parts[i - 1][2] else ""
             nxt = cores[i + 1] if i + 1 < len(parts) and not p[2] else ""
-            new = self.fix_syllable(p[1], prev, nxt, heading)
+            prev2 = cores[i - 2] if prev and i > 1 and not parts[i - 2][2] else ""
+            nxt2 = cores[i + 2] if nxt and i + 2 < len(parts) and not parts[i + 1][2] else ""
+            new = self.confusion_rule(p[1], prev, nxt) or self.fix_syllable(p[1], prev, nxt, heading, prev2, nxt2)
             if new != p[1]:
                 p[1] = new
                 cores[i] = new.lower()
@@ -392,6 +427,7 @@ class SpellFixer:
                 sum(c.isupper() for c in letters) / len(letters) > 0.8
         toks = text.split(" ")
         fixed = self.fix_tokens([t for t in toks], heading=heading)
+        fixed = self.fix_tokens(fixed, heading=heading)  # lượt 2: dùng từ đã sửa làm ngữ cảnh
         out = " ".join(fixed)
         out = re.sub(r"(?<=[^\W\d_]{3})(?<![A-Z0-9])(\d)", lambda m: " " + m.group(1), out) \
             if has_viet_marks(out) and re.search(r"[^\W\d_]\d", out) and _viet_word_digit(out) else out

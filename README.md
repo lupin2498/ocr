@@ -119,6 +119,12 @@ thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần n
 | Bảng dồn hết vào một ô, cột sai độ rộng | đường kẻ bảng 0,5pt quá mảnh; Word dùng lưới cột mặc định | lấy đường kẻ vector; ghi độ rộng cột vào `tblGrid`, bố cục cố định |
 | Hình vẽ OCR ra ký tự rác, chú thích hình bị nuốt | hình là ảnh nhúng, chú thích có khi xoay dọc | lấy vị trí ảnh nhúng, gộp chú thích xoay vào ảnh, giữ "Hình …" là chữ |
 | `kG/cm”`, `TB2-I17A`, ký tự `|` trong bảng | lỗi nhận dạng có quy luật | bước làm sạch sau OCR (`ocr_cleanup.py`) |
+| Sách scan "Bản đồ về dòng tiền": cả trang / đoạn văn bị gộp vào hình | bóng đen mép trang scan và khung viền chữ nhật bị coi là nét vẽ | bỏ thành phần chạm mép trang và khung chỉ có viền; khung + nét vẽ bên trong không phải bảng |
+| `chỉ phí`, `tỉnh thần`, `số sách`, `đề hoàn thành` lặp lại hàng trăm lần | phông sách làm OCR sai *có hệ thống*; tài liệu "học" luôn cái sai | từ điển từ ghép được ưu tiên hơn thống kê tài liệu; luật riêng cho đề/để; kiểm tra xung đột từ ghép |
+| Tiêu đề chạy, hoa văn mép trang ra chữ rác | trang trí lặp lại ở mọi trang | phát hiện dòng lặp ở mép trang trên nhiều trang và loại khỏi thân trang |
+| Mục lục `Tên mục ....zmrrtrrn 24` | dấu chấm dẫn bị đọc thành ký tự | chuẩn hoá thành `Tên mục<tab>24` |
+| `PHAN КЁТ`, `Ш` | mô hình tiếng Nga đọc nhầm chữ Latin | đổi chữ Cyrillic giống Latin trong dòng tiếng Việt |
+| Nền xám photocopy | độ tương phản thấp | làm phẳng nền trước khi OCR |
 | Trang Word bị tràn | giãn dòng/khoảng cách đoạn không khớp; số trang chiếm chỗ | giãn dòng chính xác theo PDF, số trang vào footer, chừa thêm bề ngang |
 
 ## 5. Sửa chính tả tiếng Việt sau OCR

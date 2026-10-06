@@ -100,6 +100,17 @@ def merge_regions(regions: List[BBox], gap: float) -> List[BBox]:
     return regions
 
 
+def _is_outline_frame(labels: np.ndarray, idx: int, x: int, y: int, cw: int, ch: int, lh: float) -> bool:
+    """Thành phần liên thông chủ yếu nằm trên 4 cạnh khung bao của nó (khung chữ nhật rỗng)."""
+    comp = labels[y:y + ch, x:x + cw] == idx
+    band = max(2, int(0.5 * lh))
+    total = int(comp.sum())
+    if total == 0:
+        return False
+    border = int(comp[:band].sum() + comp[-band:].sum() + comp[band:-band, :band].sum() + comp[band:-band, -band:].sum())
+    return border >= 0.85 * total
+
+
 def detect_figures(gray: np.ndarray, lines: Sequence[Line], lh: float,
                    exclude: Sequence[BBox] = (), content_width: Optional[int] = None) -> List[FigureRegion]:
     """Trả về các vùng hình. `lines`: các dòng OCR trên trang; `exclude`: vùng bảng thật."""
@@ -111,9 +122,16 @@ def detect_figures(gray: np.ndarray, lines: Sequence[Line], lh: float,
         bw[max(0, b[1] - pad):b[3] + pad, max(0, b[0] - pad):b[2] + pad] = 0
     n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
     seeds: List[BBox] = []
+    edge = max(3, int(0.012 * min(w, h)))
     for i in range(1, n):
         x, y, cw, ch, area = stats[i]
         if area < 4:
+            continue
+        # viền / bóng đen ở mép trang scan (gáy sách, mép giấy) – không phải hình
+        if x <= edge or y <= edge or x + cw >= w - edge or y + ch >= h - edge:
+            continue
+        # khung chữ nhật chỉ có đường viền (khung bao đoạn văn/hình): không làm "hạt giống" hình
+        if cw > 6 * lh and ch > 4 * lh and area < 0.08 * cw * ch and _is_outline_frame(labels, i, x, y, cw, ch, lh):
             continue
         thin_h = ch < 0.35 * lh and cw > 4 * lh   # đường kẻ ngang mảnh
         thin_v = cw < 0.35 * lh and ch > 4 * lh   # đường kẻ dọc mảnh
