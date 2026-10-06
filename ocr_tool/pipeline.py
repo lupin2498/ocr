@@ -1,6 +1,7 @@
 """Chuỗi xử lý: đọc ảnh -> tiền xử lý -> phát hiện bảng -> OCR -> bố cục -> Page."""
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from .engine import Block, TesseractEngine
 from .lang import choose_lang
 from .layout import build_page
 from .preprocess import LoadedImage, count_pages, iter_inputs, load_inputs, preprocess
-from .figures import (CAPTION_RE, crop_figure, detect_figures, merge_regions, table_is_figure,
+from .figures import (CAPTION_RE, binarize_ink, crop_figure, detect_figures, detect_frames, detect_shaded_panels, merge_regions, table_is_figure,
                       text_quality)
 from .ocr_cleanup import clean_ocr_text
 from .spellfix import DocModel, SpellFixer, get_lexicon, is_vietnamese_text
@@ -193,7 +194,8 @@ class Pipeline:
         if o.detect_figures:
             self.progress("Nhận diện hình vẽ / ảnh ...")
             tables, fig_boxes = self._find_figures(gray, blocks, tables, text_h,
-                                                   extra_boxes=text_layer.image_boxes if text_layer else ())
+                                                   extra_boxes=text_layer.image_boxes if text_layer else (),
+                                                   color=pre.color if text_layer is None else None)
             if fig_boxes:
                 fig_boxes = self._trim_captions(blocks, fig_boxes)
                 blocks = self._remove_words_in(blocks, fig_boxes)
@@ -233,7 +235,7 @@ class Pipeline:
         return tl
 
     def _find_figures(self, gray: np.ndarray, blocks: List[Block], tables: List[Table], lh: float,
-                      extra_boxes: Sequence[BBox] = ()):
+                      extra_boxes: Sequence[BBox] = (), color: Optional[np.ndarray] = None):
         h, w = gray.shape[:2]
         lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
         if lines:
@@ -242,10 +244,18 @@ class Pipeline:
             content_w = w
 
         fig_boxes: List[BBox] = list(extra_boxes)
+        if color is not None:
+            fig_boxes += self._drop_noise(gray, blocks, lh)
+            lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
         real_tables: List[Table] = []
         mask = grid_line_mask(gray, lh) if tables else None
+        diagrams = self._diagram_tables(tables, content_w)
         for t in tables:
             cell_texts = [c.text for c in t.cells]
+            if id(t) in diagrams:
+                log.info("bảng %s là ô của sơ đồ -> hình", t.bbox)
+                fig_boxes.append(t.bbox)
+                continue
             grid_n = max(1, t.n_rows * t.n_cols)
             if not t.from_text_layer and t.n_rows * t.n_cols >= 6 and \
                     (len(t.cells) < 0.45 * grid_n or (t.n_rows >= 3 and t.n_cols >= 3 and self._has_empty_edge(t))):
@@ -273,10 +283,22 @@ class Pipeline:
                 pb = p.bbox
                 near_fig = any(self._gap(pb, fb) < 2 * lh for fb in fig_boxes)
                 n_tok = len(p.text.split())
-                if (q < 0.4 and p.conf < 75) or (near_fig and q < 0.55 and n_tok <= 6):
+                # nhãn ngắn nằm sát mép trong vùng hình (chú thích của sơ đồ)
+                label = n_tok <= 3 and len(p.lines) <= 2 and any(
+                    self._gap(pb, fb) < 0.8 * lh and pb[1] >= fb[1] - lh and pb[3] <= fb[3] + lh for fb in fig_boxes)
+                if (q < 0.4 and p.conf < 75) or (near_fig and q < 0.55 and n_tok <= 6) or label:
                     small = (pb[2] - pb[0]) < 2 * lh and (pb[3] - pb[1]) < 2 * lh
                     if not small or near_fig:
                         fig_boxes.append(pb)
+        # khung nền xám chứa chữ rác (hộp minh hoạ) -> giữ nguyên cả khung làm hình
+        if color is not None:
+            for pb in detect_frames(gray, lh) + detect_shaded_panels(color, lh):
+                inside = [p for b in blocks for p in b.paragraphs if not p.is_empty() and
+                          self._inter(p.bbox, pb) > 0.5 * max(1, (p.bbox[2] - p.bbox[0]) * (p.bbox[3] - p.bbox[1]))]
+                bad = [p for p in inside if text_quality(p.text, p.conf) < 0.5]
+                if len(bad) >= 2 and sum(len(p.text) for p in bad) >= 0.1 * max(1, sum(len(p.text) for p in inside)):
+                    log.info("khung nền %s chứa chữ rác -> hình", pb)
+                    fig_boxes.append(pb)
         if not fig_boxes:
             return real_tables, []
         fig_boxes = merge_regions(fig_boxes, gap=1.5 * lh)
@@ -300,6 +322,87 @@ class Pipeline:
             kept.append(t)
         return kept, sorted(fig_boxes, key=lambda b: (b[1], b[0]))
 
+    def _diagram_tables(self, tables: List[Table], content_w: int) -> set:
+        """Các "bảng" thực ra là ô vẽ của sơ đồ: chồng lên nhau, nhiều bảng nhỏ ít ô trên cùng trang,
+        hoặc ô vuông nhỏ gần như trống (biểu tượng)."""
+        scan = [t for t in tables if not t.from_text_layer]
+        out = set()
+        for t in scan:
+            ta = max(1, (t.bbox[2] - t.bbox[0]) * (t.bbox[3] - t.bbox[1]))
+            for o in scan:
+                if o is not t and self._inter(t.bbox, o.bbox) > 0.1 * ta:
+                    out.add(id(t))
+        small = [t for t in scan if (t.bbox[2] - t.bbox[0]) < 0.5 * content_w and len(t.cells) <= 8]
+        if len(small) >= 2:
+            out.update(id(t) for t in small)
+        for t in scan:
+            empty = sum(1 for c in t.cells if not c.text.strip())
+            if len(t.cells) <= 4 and empty >= 0.5 * len(t.cells) and (t.bbox[2] - t.bbox[0]) < 0.5 * content_w:
+                out.add(id(t))
+        return out
+
+    @staticmethod
+    def _noise_line(ln) -> bool:
+        if not ln.words:
+            return False
+        text = ln.text
+        chars = [c for c in text if not c.isspace()]
+        alnum = sum(c.isalnum() for c in chars)
+        return ln.conf < 60 and (text_quality(text, ln.conf) < 0.5 or 1 - alnum / max(1, len(chars)) > 0.3)
+
+    def _drop_noise(self, gray: np.ndarray, blocks: List[Block], lh: float) -> List[BBox]:
+        """Chữ "ma" do lốm đốm nền xám / bóng viền khung / chữ đọc trùng hai lần.
+        Đoạn tin cậy thấp và giống rác: có nét vẽ thật bên dưới -> trả về làm vùng hình, không thì bỏ."""
+        h, w = gray.shape[:2]
+        bw = binarize_ink(gray)
+        figs: List[BBox] = []
+        allp = [p for b in blocks for p in b.paragraphs if not p.is_empty()]
+        # dòng rác ở đầu/cuối một đoạn tốt (lốm đốm nền dính vào đoạn)
+        for p in allp:
+            while len(p.lines) >= 2 and self._noise_line(p.lines[0]):
+                p.lines = p.lines[1:]
+            while len(p.lines) >= 2 and self._noise_line(p.lines[-1]):
+                p.lines = p.lines[:-1]
+        drop = set()
+        for p in allp:
+            text = p.text
+            if CAPTION_RE.match(text) or p.conf >= 65:
+                continue
+            chars = [c for c in text if not c.isspace()]
+            alnum = sum(c.isalnum() for c in chars)
+            sym = 1 - alnum / max(1, len(chars))
+            q = text_quality(text, p.conf)
+            if len(chars) > 80 or not (q < 0.7 or sym > 0.25 or alnum <= 3):
+                continue
+            drop.add(id(p))
+            x0, y0, x1, y1 = p.bbox
+            n, _, st, _ = cv2.connectedComponentsWithStats(bw[y0:y1, x0:x1], 8)
+            if n > 1 and (st[1:, 2].max() > 2.5 * lh or st[1:, 3].max() > 2.5 * lh) \
+                    and lh * 3 < y0 and y1 < h - lh * 3:
+                figs.append(p.bbox)
+        # đoạn đọc trùng (chữ có bóng/đậm): nằm gần trọn trong đoạn khác tin cậy hơn
+        for p in allp:
+            if id(p) in drop:
+                continue
+            pa = max(1, (p.bbox[2] - p.bbox[0]) * (p.bbox[3] - p.bbox[1]))
+            tiny = sum(c.isalnum() for c in p.text) <= 4 and len(p.lines) == 1
+            for o in allp:
+                if o is p or id(o) in drop or (o.conf < p.conf and not tiny):
+                    continue
+                oa = (o.bbox[2] - o.bbox[0]) * (o.bbox[3] - o.bbox[1])
+                if oa <= pa:
+                    continue
+                overlap = self._inter(p.bbox, o.bbox) / pa
+                if (tiny and overlap >= 0.6) or (overlap >= 0.75 and difflib.SequenceMatcher(
+                        None, p.text, o.text).ratio() * (len(p.text) + len(o.text)) >= 1.5 * len(p.text)):
+                    drop.add(id(p))
+                    break
+        if drop:
+            log.info("bỏ %d đoạn chữ nhiễu/đọc trùng", len(drop))
+            for b in blocks:
+                b.paragraphs = [p for p in b.paragraphs if id(p) not in drop]
+        return figs
+
     def _recover_missed_text(self, gray: np.ndarray, blocks: List[Block], fig_boxes: List[BBox],
                              table_boxes: List[BBox], lh: float) -> List[Block]:
         h, w = gray.shape[:2]
@@ -318,6 +421,7 @@ class Pipeline:
         joined = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_RECT, (int(1.2 * lh), max(3, int(0.4 * lh)))))
         contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         found: List[Block] = []
+        para_boxes = [p.bbox for b in blocks for p in b.paragraphs if not p.is_empty()]
         for cnt in contours:
             x, y, cw, ch = cv2.boundingRect(cnt)
             if cw < 1.5 * lh or ch < 0.5 * lh or ch > 6 * lh:
@@ -331,6 +435,16 @@ class Pipeline:
             for blk in self.engine.group_words(items):
                 if blk.is_empty():
                     continue
+                bb = blk.bbox
+                ba = max(1, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+                tiny = sum(c.isalnum() for c in blk.text) <= 4
+                if any(self._inter(bb, pb) >= 0.6 * ba for pb in para_boxes):
+                    continue  # đọc trùng dòng đã có
+                if tiny and any(self._gap(bb, fb) < lh for fb in fig_boxes):
+                    continue  # mảnh nhãn của hình
+                chars = [c for c in blk.text if not c.isspace()]
+                if sum(not c.isalnum() for c in chars) > 0.3 * len(chars):
+                    continue  # chủ yếu ký hiệu: vết bẩn, mũi tên
                 if blk.conf >= 60 and text_quality(blk.text, blk.conf) >= 0.5:
                     log.info("đọc bổ sung dòng bị bỏ sót: %r", blk.text[:60])
                     blk.lang = self.engine.combined_lang

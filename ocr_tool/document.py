@@ -94,6 +94,7 @@ class Paragraph:
     keep_breaks: bool = False   # giữ đúng ngắt dòng gốc (lớp chữ PDF)
     italic: bool = False
     line_pitch_pt: Optional[float] = None  # khoảng cách dòng chính xác (lớp chữ PDF)
+    char_spacing_pt: float = 0.0  # giãn/co khoảng cách ký tự (âm = co) để ngắt dòng như bản gốc
 
     @property
     def text(self) -> str:

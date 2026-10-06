@@ -126,6 +126,12 @@ thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần n
 | `PHAN КЁТ`, `Ш` | mô hình tiếng Nga đọc nhầm chữ Latin | đổi chữ Cyrillic giống Latin trong dòng tiếng Việt |
 | Nền xám photocopy | độ tương phản thấp | làm phẳng nền trước khi OCR |
 | Trang Word bị tràn | giãn dòng/khoảng cách đoạn không khớp; số trang chiếm chỗ | giãn dòng chính xác theo PDF, số trang vào footer, chừa thêm bề ngang |
+| Sách scan: 230 trang gốc thành 306 trang Word | cỡ chữ ước lượng theo chiều cao chữ, nhưng phông sách hẹp hơn Times New Roman nên mỗi đoạn dài thêm 1–2 dòng | chọn cỡ chữ sao cho Times New Roman phủ đúng bề rộng dòng gốc (bảng bề rộng ký tự), giãn dòng chính xác theo khoảng cách dòng đo được, một cỡ chữ thân bài cho cả trang |
+| Bìa / tranh minh hoạ bị cắt vụn, chữ rác quanh tranh | ảnh tràn lề bị bỏ vì chạm mép; các mảnh tranh không được gộp | giữ thành phần lớn/đặc chạm mép; gộp mảnh trong 1,5 dòng; trang gần như toàn tranh thành một hình |
+| Chữ rác `ye Ges <i`, `+, 14 wy` quanh hộp minh hoạ; chữ in bóng bị đọc 2 lần | nền xám lốm đốm và bóng viền hộp bị OCR thành chữ tin cậy thấp | bỏ đoạn tin cậy thấp có dạng rác (nếu bên dưới có nét vẽ thật thì giữ làm hình); bỏ đoạn đọc trùng nằm trong đoạn tốt hơn |
+| Sơ đồ "9 dòng chảy" thành 2 bảng đầy ký hiệu lạ | khung sơ đồ có lưới giống bảng; mũi tên đọc thành `¬ ~ — * @` | "bảng" có nhiều ký hiệu sơ đồ -> giữ làm hình; `¬` giữa hai từ -> `→` |
+| Đoạn có chữ đậm vẫn tràn 1 dòng | chữ đậm gốc rộng hơn, dùng chung cỡ chữ trang làm dòng bị ngắt thêm | co khoảng cách ký tự cho riêng đoạn đó; tắt chống dòng mồ côi; chừa lề dưới |
+| Mục lục `....lO5`, `...LOS` | số trang bị đọc thành chữ | đổi chữ giống số (l, O, S, I…) về số khi đứng sau dấu dẫn |
 
 ## 5. Sửa chính tả tiếng Việt sau OCR
 

@@ -89,7 +89,8 @@ def _compute_margins(page: Page) -> None:
     # chừa thêm ~0.15" bề ngang: phông thay thế rộng hơn chút sẽ không làm xuống dòng thừa
     page.margin_right_in = clamp(r - 0.15, 0.3, 1.6)
     page.margin_top_in = clamp(t, 0.4, 1.6)
-    page.margin_bottom_in = clamp(b, 0.4, 1.6)
+    # dòng cuối trong Word chiếm trọn khoảng cách dòng (dài hơn hộp chữ) -> chừa thêm chút lề dưới
+    page.margin_bottom_in = clamp(b - 0.2, 0.3, 1.6)
 
 
 COMMON_SIZES = [7, 8, 9, 10, 10.5, 11, 12, 13, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40, 48]
@@ -248,15 +249,32 @@ def _style_elements(page: Page) -> None:
             p.line_pitch_pt = round(max(p.fixed_size_pt, p.line_spacing * 1.15 * p.fixed_size_pt), 1)
         else:
             fit = _fit_size_pt(page, p, p.bold)
+            own = fit
             if fit and page_fit and p.font_size_pt == base_snap and fit >= 0.9 * page_fit:
                 fit = page_fit  # chữ thân bài: một cỡ chung cho cả trang
             if fit and fit < p.font_size_pt:
                 p.font_size_pt = max(p.font_size_pt * 0.75, math.floor(fit * 0.97 * 2) / 2)
+            if own and own * 0.97 < p.font_size_pt:
+                # đoạn này cần hẹp hơn cỡ chung (chữ đậm/nghiêng trong bản gốc): co khoảng cách ký tự
+                full = [ln for ln in p.lines if ln.words][:-1] or [ln for ln in p.lines if ln.words]
+                n_chars = sum(len(ln.text) for ln in full)
+                em_per_char = sum(text_width_em(ln.text, p.bold) for ln in full) / max(1, n_chars)
+                cs = -(p.font_size_pt - own * 0.97) * em_per_char
+                if cs >= -0.06 * p.font_size_pt:
+                    p.char_spacing_pt = round(cs, 2)
+                else:
+                    p.font_size_pt = max(p.font_size_pt * 0.75, math.floor(own * 0.97 * 2) / 2)
             p.line_spacing = _line_spacing(p, lh)
             pitch = _line_pitch_px(p)
             if pitch:
                 p.line_pitch_pt = round(max(p.font_size_pt * 1.05,
                                             min(p.font_size_pt * 2.2, page.px_to_pt(pitch))), 1)
+            if nxt is not None and nxt.top > pb[1]:
+                # khoảng từ đầu đoạn này tới đầu phần tử sau giữ đúng như bản gốc
+                n_lines = sum(1 for ln in p.lines if ln.words)
+                used = n_lines * (p.line_pitch_pt or p.font_size_pt * 1.15 * p.line_spacing)
+                p.space_after_pt = float(max(0.0, min(30.0, round(page.px_to_pt(nxt.top - pb[1]) - used))))
+                continue
         p.space_after_pt = _space_after(page, pb[3], nxt, lh)
 
 

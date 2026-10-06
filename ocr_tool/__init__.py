@@ -1,3 +1,3 @@
 """OCR2Word - chuyển ảnh có chữ (Việt / Anh / Nga) thành file Word giữ bố cục và bảng."""
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"

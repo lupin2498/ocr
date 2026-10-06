@@ -36,6 +36,18 @@ def _set_run_font(run, name: str, size_pt: float, bold: bool = False, italic: bo
         rfonts.set(qn(attr), name)
 
 
+def _set_char_spacing(run, pt: float) -> None:
+    val = int(round(pt * 20))
+    if not val:
+        return
+    rpr = run._element.get_or_add_rPr()
+    sp = OxmlElement("w:spacing")
+    sp.set(qn("w:val"), str(val))
+    rpr.insert_element_before(sp, "w:w", "w:kern", "w:position", "w:sz", "w:szCs", "w:highlight", "w:u",
+                              "w:effect", "w:bdr", "w:shd", "w:fitText", "w:vertAlign", "w:rtl", "w:cs",
+                              "w:em", "w:lang", "w:eastAsianLayout", "w:specVanish", "w:oMath")
+
+
 def _join_lines(lines: List[str]) -> str:
     """Nối các dòng OCR thành một đoạn; xử lý từ bị ngắt bằng gạch nối."""
     out = ""
@@ -124,6 +136,7 @@ class DocxExporter:
             pf.first_line_indent = Inches(max(-1.0, min(1.5, p.first_line_indent_in)))
         pf.space_after = Pt(p.space_after_pt)
         pf.space_before = Pt(0)
+        pf.widow_control = False  # không đẩy 2 dòng sang trang sau như bản gốc không có
         if p.line_pitch_pt:
             pf.line_spacing = Pt(p.line_pitch_pt)  # "Exactly" như bản gốc -> trang không bị tràn
         else:
@@ -148,6 +161,7 @@ class DocxExporter:
         else:
             run = para.add_run(_join_lines(lines).replace(" \t", "\t"))
             _set_run_font(run, self.font_name, p.font_size_pt, p.bold, p.italic)
+            _set_char_spacing(run, p.char_spacing_pt)
 
     def _write_figure(self, doc, page: Page, f: Figure) -> None:
         import io

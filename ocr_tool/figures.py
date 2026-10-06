@@ -200,6 +200,50 @@ def detect_figures(gray: np.ndarray, lines: Sequence[Line], lh: float,
     return [FigureRegion(b, "graphics") for b in merged]
 
 
+def detect_frames(gray: np.ndarray, lh: float) -> List[BBox]:
+    """Khung chữ nhật chỉ có đường viền (hộp chữ / hộp minh hoạ)."""
+    h, w = gray.shape[:2]
+    lh = max(8.0, lh)
+    bw = binarize_ink(gray)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    out: List[BBox] = []
+    for i in range(1, n):
+        x, y, cw, ch, area = stats[i]
+        if cw > 6 * lh and ch > 4 * lh and area < 0.08 * cw * ch and cw < 0.98 * w and ch < 0.98 * h \
+                and _is_outline_frame(labels, i, x, y, cw, ch, lh):
+            out.append((int(x), int(y), int(x + cw), int(y + ch)))
+    return out
+
+
+def detect_shaded_panels(color: np.ndarray, lh: float, min_frac: float = 0.03) -> List[BBox]:
+    """Khung tô nền xám/màu (hộp minh hoạ). Bước làm phẳng nền trước OCR xoá mất các khung này,
+    nên dò trên ảnh gốc: đóng hình thái học (xoá nét chữ) rồi lấy vùng tối hơn nền giấy."""
+    g = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY) if color.ndim == 3 else color
+    h, w = g.shape[:2]
+    f = 4
+    small = cv2.resize(g, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
+    k = max(3, int(1.5 * lh / f) | 1)
+    filled = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    paper = float(np.percentile(small, 90))
+    mask = (filled < paper - 30).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    out: List[BBox] = []
+    sw, sh = small.shape[1], small.shape[0]
+    for i in range(1, n):
+        x, y, cw, ch, area = stats[i]
+        if cw * ch < min_frac * sw * sh or area < 0.6 * cw * ch:
+            continue
+        touches = x <= 1 or y <= 1 or x + cw >= sw - 1 or y + ch >= sh - 1
+        if touches and min(cw, ch) < 0.15 * min(sw, sh):
+            continue  # bóng mép trang scan
+        out.append((x * f, y * f, min(w, (x + cw) * f), min(h, (y + ch) * f)))
+    return out
+
+
+_DIAGRAM_GLYPHS = set("¬~`\\@*_<>®©¥‹›§¤•=—→←↑↓")
+
+
 def table_is_figure(gray: np.ndarray, table_bbox: BBox, line_mask: Optional[np.ndarray],
                     word_boxes: Iterable[BBox], cell_texts: Sequence[str], lh: float) -> bool:
     """Bảng phát hiện được có thực là hình vẽ không? (nhiều nét vẽ ngoài chữ, hoặc ô toàn ký tự rác)."""
@@ -221,7 +265,15 @@ def table_is_figure(gray: np.ndarray, table_bbox: BBox, line_mask: Optional[np.n
     empty_ratio = 1 - len(texts) / max(1, len(cell_texts))
     quality = np.mean([text_quality(c) for c in texts]) if texts else 0.0
     log.debug("bảng %s: mực thừa %.3f, ô trống %.2f, chất lượng chữ %.2f", table_bbox, residual, empty_ratio, quality)
+    # mũi tên, khung, biểu tượng của sơ đồ bị OCR thành ký hiệu lạ trong "ô"
+    joined = "".join(texts)
+    glyphs = sum(c in _DIAGRAM_GLYPHS for c in joined)
+    alnum = sum(c.isalnum() for c in joined)
+    glyph_ratio = glyphs / max(1, alnum)
+    log.debug("bảng %s: ký hiệu sơ đồ %d (%.2f)", table_bbox, glyphs, glyph_ratio)
     if residual > 0.03:
+        return True
+    if glyphs >= 5 and (glyph_ratio >= 0.08 or (residual > 0.012 and glyph_ratio >= 0.04)):
         return True
     if texts and quality < 0.35:
         return True

@@ -122,3 +122,37 @@ def test_scan_font_fits_original_line_width():
         need_pt = text_width_em(ln.text) * p.font_size_pt
         assert need_pt <= (ln.bbox[2] - ln.bbox[0]) / dpi * 72 + 1
     assert p.line_pitch_pt == pytest.approx(90 / dpi * 72, abs=0.6)
+
+
+def test_arrow_glyph_and_diagram_table():
+    import numpy as np
+
+    from ocr_tool.figures import table_is_figure
+
+    assert clean_ocr_text("GỌI VỐN ¬ CHUYỂN TIỀN ĐÓ") == "GỌI VỐN → CHUYỂN TIỀN ĐÓ"
+    blank = np.full((400, 600), 255, np.uint8)
+    diagram_cells = ["TIỀN MẶT\n— TÀI", "¬\n*@\nN", "NỢ -~—\nN", "`\nTÀI SẢN\nRÒNG _"]
+    assert table_is_figure(blank, (0, 0, 600, 400), None, [], diagram_cells, 30)
+    real_cells = ["Doanh thu", "1.250.000", "Chi phí", "980.000", "Lợi nhuận", "270.000"]
+    assert not table_is_figure(blank, (0, 0, 600, 400), None, [], real_cells, 30)
+
+
+def test_noise_paragraphs_dropped():
+    """Lốm đốm nền xám bị OCR thành 'chữ' tin cậy thấp -> bỏ; chữ đọc trùng (bóng chữ) -> bỏ."""
+    import numpy as np
+
+    from ocr_tool.document import Line, Word
+    from ocr_tool.engine import Block
+
+    def para(text, box, conf):
+        x0, y0, x1, y1 = box
+        return Paragraph(lines=[Line([Word(text, x0, y0, x1 - x0, y1 - y0, conf)])])
+
+    good = para("Việc giải trình dòng tiền vào ra của một công ty", (600, 1500, 1900, 1710), 92)
+    dup = para("c giải trình dè của mội", (770, 1520, 1280, 1700), 88)
+    noise = [para("ye Ges <i", (430, 830, 476, 960), 18), para("`. “._. `", (540, 1646, 760, 1818), 61)]
+    blocks = [Block([good, dup] + noise)]
+    gray = np.full((3500, 2475), 255, np.uint8)
+    figs = Pipeline(Options())._drop_noise(gray, blocks, 40)
+    assert figs == []
+    assert [p.text for p in blocks[0].paragraphs] == [good.text]

@@ -118,4 +118,5 @@ def clean_ocr_text(text: str) -> str:
     out = _BAR_EDGE.sub("", out)
     out = _UNIT_SQ.sub(lambda m: m.group(1) + "2", out)
     out = _CODE_I.sub(_fix_code, out)
+    out = re.sub(r"(?<=\S) ¬ (?=\S)", " → ", out)  # mũi tên in đậm bị đọc thành "¬"
     return re.sub(r"[ \t]{2,}", " ", out).strip() if out != text else text
