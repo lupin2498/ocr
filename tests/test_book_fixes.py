@@ -96,3 +96,29 @@ def test_running_header_removed(tmp_path):
         text = " ".join(e.text for e in pg.elements if isinstance(e, Paragraph))
         assert "DÒNG TIỀN" not in text and "BẢN ĐỒ" not in text, text
         assert body[:20] in " ".join(text.split())
+
+
+def test_scan_font_fits_original_line_width():
+    """Trang scan: cỡ chữ phải đủ nhỏ để Times New Roman ngắt dòng như bản gốc (không tràn trang)."""
+    from ocr_tool.document import Line, Word
+    from ocr_tool.layout import build_page, text_width_em
+
+    dpi = 300
+    texts = ["Không ít người bắt đầu công việc kế toán bằng việc học",
+             "“Ghi sổ” (Bookkeeping). “Ghi sổ” là một phần của kế toán.",
+             "Việc ghi chép sổ sách như thế nào cho đúng đương nhiên là",
+             "điều hết sức quan trọng."]
+    lines, top = [], 300
+    for k, t in enumerate(texts):
+        width = 1500 if k < 3 else 600  # dòng đầy ~5 inch; chữ thật cao ~60px (~14pt)
+        n = len(t.split())
+        step = width // n
+        lines.append(Line([Word(w, 300 + i * step, top, step - 10, 60, 95) for i, w in enumerate(t.split())]))
+        top += 90
+    para = Paragraph(lines=lines)
+    page = build_page(2480, 3508, dpi, [para])
+    p = page.elements[0]
+    for ln in lines[:3]:
+        need_pt = text_width_em(ln.text) * p.font_size_pt
+        assert need_pt <= (ln.bbox[2] - ln.bbox[0]) / dpi * 72 + 1
+    assert p.line_pitch_pt == pytest.approx(90 / dpi * 72, abs=0.6)

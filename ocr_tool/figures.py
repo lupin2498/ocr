@@ -127,9 +127,13 @@ def detect_figures(gray: np.ndarray, lines: Sequence[Line], lh: float,
         x, y, cw, ch, area = stats[i]
         if area < 4:
             continue
-        # viền / bóng đen ở mép trang scan (gáy sách, mép giấy) – không phải hình
+        # viền / bóng đen ở mép trang scan (gáy sách, mép giấy) – không phải hình.
+        # Ảnh tràn lề thật (bìa sách, ảnh chụp) thì lớn theo cả hai chiều và đặc -> vẫn là hình.
         if x <= edge or y <= edge or x + cw >= w - edge or y + ch >= h - edge:
-            continue
+            fill = area / max(1, cw * ch)
+            thin = min(cw, ch) < 0.15 * min(w, h)
+            if thin or fill < 0.3:
+                continue
         # khung chữ nhật chỉ có đường viền (khung bao đoạn văn/hình): không làm "hạt giống" hình
         if cw > 6 * lh and ch > 4 * lh and area < 0.08 * cw * ch and _is_outline_frame(labels, i, x, y, cw, ch, lh):
             continue
@@ -192,7 +196,7 @@ def detect_figures(gray: np.ndarray, lines: Sequence[Line], lh: float,
             log.debug("bỏ qua khung chữ %s", box)
             continue
         out.append(FigureRegion(box, reg.reason))
-    merged = merge_regions([r.bbox for r in out], gap=0.8 * lh)
+    merged = merge_regions([r.bbox for r in out], gap=1.5 * lh)
     return [FigureRegion(b, "graphics") for b in merged]
 
 

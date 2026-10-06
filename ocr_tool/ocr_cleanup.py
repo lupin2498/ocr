@@ -62,17 +62,44 @@ def _is_leader_junk(tok: str) -> bool:
     return common / len(letters) >= 0.2 or vowels / len(letters) < 0.25
 
 
+_DIGITISH = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "S": "5", "s": "5", "l": "1", "I": "1",
+                           "i": "1", "|": "1", "Z": "2", "z": "2", "B": "8", "g": "9", "q": "9"})
+
+
+_DIGITLIKE = set("0123456789OoDQSsLlIi|ZzBgq")
+
+
+def _as_page_number(tok: str) -> str:
+    """Số trang cuối dòng mục lục bị đọc thành chữ: 'LOS' -> '105'? (chỉ khi gần như toàn ký tự giống số)."""
+    t = tok.strip(".,;:")
+    if re.fullmatch(r"\d{1,4}", t):
+        return t
+    conv = t.replace("L", "1").translate(_DIGITISH)
+    if 1 <= len(t) <= 4 and re.fullmatch(r"\d{1,4}", conv) and all(c in _DIGITLIKE for c in t):
+        return conv
+    return ""
+
+
 def fix_toc_leader(text: str) -> str:
     """Dòng mục lục 'Tên mục ........ 24' (dấu chấm dẫn bị OCR thành ký tự rác) -> 'Tên mục\t24'."""
+    # "Doanh thu........lO5" -> tách số trang dính sau dấu chấm dẫn
+    m0 = re.search(r"\.{3,}([A-Za-z0-9|]{1,4})\s*$", text)
+    if m0 and _as_page_number(m0.group(1)):
+        text = text[:m0.start(1)] + " " + _as_page_number(m0.group(1))
     toks = text.split()
+    if len(toks) >= 3 and not re.fullmatch(r"\d{1,4}", toks[-1]) and _as_page_number(toks[-1]) and \
+            (_is_leader_junk(toks[-2]) or toks[-2].count(".") >= 3):
+        toks[-1] = _as_page_number(toks[-1])
+        text = " ".join(toks)
     if len(toks) >= 3 and re.fullmatch(r"\d{1,4}", toks[-1]) or (len(toks) >= 4 and re.fullmatch(r"\d{1,4}", toks[-2])):
         idx = len(toks) - 1 if re.fullmatch(r"\d{1,4}", toks[-1]) else len(toks) - 2
         before = toks[idx - 1]
         m2 = re.match(r"(.*?\S)\.{2,}(.*)$", before)
         if _is_leader_junk(before) or (m2 and _is_leader_junk(before)):
             head = " ".join(toks[:idx - 1])
-            lead = re.split(r"\.{2,}", before)[0]
-            title = (head + " " + lead).strip().rstrip(" .,")
+            lead = re.split(r"\.{2,}", before)[0] if not _is_leader_junk(re.split(r"\.{2,}", before)[0]) else ""
+            title = (head + " " + lead).strip()
+            title = re.split(r"\s*[.…·,_\-«»<>~]{3,}", title)[0].strip().rstrip(" .,")
             return f"{title}\t{toks[idx]}"
     if text.count(".") < 4 and "…" not in text:
         return text

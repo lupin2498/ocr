@@ -271,16 +271,26 @@ class Pipeline:
                     continue
                 q = text_quality(p.text, p.conf)
                 pb = p.bbox
-                if q < 0.4 and p.conf < 75:
+                near_fig = any(self._gap(pb, fb) < 2 * lh for fb in fig_boxes)
+                n_tok = len(p.text.split())
+                if (q < 0.4 and p.conf < 75) or (near_fig and q < 0.55 and n_tok <= 6):
                     small = (pb[2] - pb[0]) < 2 * lh and (pb[3] - pb[1]) < 2 * lh
-                    near_fig = any(self._gap(pb, fb) < 2 * lh for fb in fig_boxes)
                     if not small or near_fig:
                         fig_boxes.append(pb)
         if not fig_boxes:
             return real_tables, []
-        fig_boxes = merge_regions(fig_boxes, gap=0.8 * lh)
+        fig_boxes = merge_regions(fig_boxes, gap=1.5 * lh)
         # loại vùng hình quá nhỏ (nhiễu)
         fig_boxes = [fb for fb in fig_boxes if (fb[2] - fb[0]) >= 2 * lh and (fb[3] - fb[1]) >= 1.5 * lh]
+        # hình chiếm phần lớn trang (bìa sách, ảnh toàn trang) mà chữ còn lại ít/kém -> giữ cả trang làm ảnh
+        fig_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in fig_boxes)
+        if fig_area > 0.45 * w * h:
+            rest = [ln for ln in lines if not any(fb[0] <= (ln.bbox[0] + ln.bbox[2]) / 2 <= fb[2] and
+                                                fb[1] <= (ln.bbox[1] + ln.bbox[3]) / 2 <= fb[3] for fb in fig_boxes)]
+            good = [ln for ln in rest if text_quality(ln.text, ln.conf) >= 0.6 and ln.conf >= 70]
+            if sum(len(ln.text) for ln in good) < 150:
+                from .document import union_bbox as _ub
+                fig_boxes = [_ub(fig_boxes + [ln.bbox for ln in rest])] if rest else [_ub(fig_boxes)]
         # bảng thật nằm trong hình -> thuộc hình
         kept = []
         for t in real_tables:

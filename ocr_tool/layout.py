@@ -1,8 +1,12 @@
 """Suy ra bố cục (khổ giấy, lề, canh lề, cỡ chữ, thụt đầu dòng, giãn cách) từ toạ độ OCR."""
 from __future__ import annotations
 
+import json
+import math
 import logging
+import os
 import re
+from functools import lru_cache
 from statistics import median
 from typing import List, Optional, Tuple
 
@@ -96,6 +100,43 @@ _ABOVE = set("ăâêôơưĂÂÊÔƠƯàảãáằẳẵắầẩẫấèẻẽ�
 _BELOW = set("ạặậẹệịọộợụựỵẠẶẬẸỆỊỌỘỢỤỰỴ")
 
 
+@lru_cache(maxsize=1)
+def _serif_widths() -> dict:
+    """Bề rộng (đơn vị 1/1000 em) của phông serif tương thích số đo Times New Roman."""
+    path = os.path.join(os.path.dirname(__file__), "data", "serif_widths.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return {st: dict(zip(d[st], d[st + "_w"])) for st in ("regular", "bold")}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def text_width_em(text: str, bold: bool = False) -> float:
+    """Bề rộng chuỗi khi dựng bằng Times New Roman, tính theo em."""
+    table = _serif_widths().get("bold" if bold else "regular", {})
+    return sum(table.get(c, 500) for c in text) / 1000.0
+
+
+def _fit_size_pt(page: Page, p: Paragraph, bold: bool) -> Optional[float]:
+    """Cỡ chữ để Times New Roman phủ đúng bề rộng các dòng gốc -> Word ngắt dòng như bản gốc
+    (tránh dòng thừa làm tràn trang)."""
+    lines = [ln for ln in p.lines if ln.words]
+    if not lines:
+        return None
+    full = lines[:-1] if len(lines) > 1 else lines
+    sizes = []
+    for ln in full:
+        em = text_width_em(ln.text, bold)
+        w = ln.bbox[2] - ln.bbox[0]
+        if em >= 3 and w > 0:
+            sizes.append(page.px_to_pt(w) / em)
+    if not sizes:
+        return None
+    # dòng đơn / dòng cuối không giãn đều: không được vượt quá bề rộng thật
+    return min(median(sizes), min(sizes) * 1.08) if len(lines) > 1 else sizes[0]
+
+
 def _snap_size(pt: float) -> float:
     return min(COMMON_SIZES, key=lambda s: abs(s - pt))
 
@@ -142,6 +183,11 @@ def _style_elements(page: Page) -> None:
     base_pt = float(median([p.fixed_size_pt or _font_size_pt(page, p) for p in paras]))
 
     pdf_pitch_ratio = _page_pdf_pitch_ratio(page, paras)
+    base_snap = _snap_size(base_pt)
+    body_fits = [f for f in (_fit_size_pt(page, q, False) for q in paras
+                             if not q.fixed_size_pt and len(q.lines) >= 3
+                             and _font_size_pt(page, q) == base_snap) if f]
+    page_fit = median(body_fits) if body_fits else None
     content = _content_bbox(page)
     cL, cR = content[0], content[2]
     content_w = max(1, cR - cL)
@@ -201,7 +247,16 @@ def _style_elements(page: Page) -> None:
             p.line_spacing = _pdf_line_spacing(page, p, pdf_pitch_ratio)
             p.line_pitch_pt = round(max(p.fixed_size_pt, p.line_spacing * 1.15 * p.fixed_size_pt), 1)
         else:
+            fit = _fit_size_pt(page, p, p.bold)
+            if fit and page_fit and p.font_size_pt == base_snap and fit >= 0.9 * page_fit:
+                fit = page_fit  # chữ thân bài: một cỡ chung cho cả trang
+            if fit and fit < p.font_size_pt:
+                p.font_size_pt = max(p.font_size_pt * 0.75, math.floor(fit * 0.97 * 2) / 2)
             p.line_spacing = _line_spacing(p, lh)
+            pitch = _line_pitch_px(p)
+            if pitch:
+                p.line_pitch_pt = round(max(p.font_size_pt * 1.05,
+                                            min(p.font_size_pt * 2.2, page.px_to_pt(pitch))), 1)
         p.space_after_pt = _space_after(page, pb[3], nxt, lh)
 
 
@@ -259,6 +314,13 @@ def _page_pdf_pitch_ratio(page: Page, paras: List[Paragraph]) -> float:
 def _pdf_line_spacing(page: Page, p: Paragraph, default: float) -> float:
     r = _pitch_ratio(page, p) or default
     return round(max(0.8, min(3.0, r)), 2)
+
+
+def _line_pitch_px(p: Paragraph) -> Optional[float]:
+    tops = [ln.bbox[1] for ln in p.lines if ln.words]
+    if len(tops) < 2 or tops[-1] <= tops[0]:
+        return None
+    return (tops[-1] - tops[0]) / (len(tops) - 1)
 
 
 def _line_spacing(p: Paragraph, lh: float) -> float:
