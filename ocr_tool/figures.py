@@ -215,29 +215,46 @@ def detect_frames(gray: np.ndarray, lh: float) -> List[BBox]:
     return out
 
 
+_PANEL_DELTA = 10
+_PANEL_SIDE = 0.6
+
+
 def detect_shaded_panels(color: np.ndarray, lh: float, min_frac: float = 0.03) -> List[BBox]:
-    """Khung tô nền xám/màu (hộp minh hoạ). Bước làm phẳng nền trước OCR xoá mất các khung này,
-    nên dò trên ảnh gốc: đóng hình thái học (xoá nét chữ) rồi lấy vùng tối hơn nền giấy."""
+    """Khung tô nền / viền xám dày (hộp minh hoạ của sách). Bước làm phẳng nền trước OCR xoá mất
+    các khung này nên dò trên ảnh gốc: đóng hình thái học (xoá nét chữ) rồi lấy vùng tối hơn giấy.
+    Trả về khung đặc (nền xám) và khung viền dày (hình chữ nhật rỗng)."""
     g = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY) if color.ndim == 3 else color
     h, w = g.shape[:2]
     f = 4
     small = cv2.resize(g, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
-    k = max(3, int(1.5 * lh / f) | 1)
+    k = max(3, int(0.3 * lh / f) | 1)  # rộng hơn nét chữ, hẹp hơn viền khung
     filled = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     paper = float(np.percentile(small, 90))
-    mask = (filled < paper - 30).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    mask = (filled < paper - _PANEL_DELTA).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (2 * k + 1, 2 * k + 1)))
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out: List[BBox] = []
     sw, sh = small.shape[1], small.shape[0]
     for i in range(1, n):
         x, y, cw, ch, area = stats[i]
-        if cw * ch < min_frac * sw * sh or area < 0.6 * cw * ch:
+        if cw * ch < min_frac * sw * sh or cw < 0.25 * sw or ch < 0.1 * sh:
             continue
         touches = x <= 1 or y <= 1 or x + cw >= sw - 1 or y + ch >= sh - 1
         if touches and min(cw, ch) < 0.15 * min(sw, sh):
             continue  # bóng mép trang scan
-        out.append((x * f, y * f, min(w, (x + cw) * f), min(h, (y + ch) * f)))
+        if touches and cw * ch > 0.8 * sw * sh:
+            continue
+        solid = area >= 0.6 * cw * ch
+        ring = False
+        if not solid and cw > 6 * k and ch > 6 * k:
+            comp = labels[y:y + ch, x:x + cw] == i
+            band = 2 * k
+            # cạnh khung: tỉ lệ hàng/cột trong dải mép có điểm thuộc khung
+            sides = [comp[:band].any(axis=0).mean(), comp[-band:].any(axis=0).mean(),
+                     comp[:, :band].any(axis=1).mean(), comp[:, -band:].any(axis=1).mean()]
+            ring = sum(v > _PANEL_SIDE for v in sides) >= 3 and comp[band:-band, band:-band].mean() < 0.3
+        if solid or ring:
+            out.append((int(x) * f, int(y) * f, min(w, (int(x) + int(cw)) * f), min(h, (int(y) + int(ch)) * f)))
     return out
 
 

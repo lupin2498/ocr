@@ -206,6 +206,8 @@ class Pipeline:
                     gray, blocks, [f.bbox for f in figures], [t.bbox for t in tables] + [g.bbox for g in grids],
                     text_h)
 
+        if text_layer is None:
+            blocks = self._drop_lone_glyphs(blocks, text_h, h)
         elements = self._order_elements(blocks, tables, figures)
         page = build_page(w, h, dpi, elements, source=li.source, page_index=li.page_index)
         if fix_spelling:
@@ -290,14 +292,36 @@ class Pipeline:
                     small = (pb[2] - pb[0]) < 2 * lh and (pb[3] - pb[1]) < 2 * lh
                     if not small or near_fig:
                         fig_boxes.append(pb)
-        # khung nền xám chứa chữ rác (hộp minh hoạ) -> giữ nguyên cả khung làm hình
+        # hộp minh hoạ: khung viền/nền xám có sơ đồ hoặc chữ rác bên trong -> giữ nguyên cả hộp làm hình
         if color is not None:
-            for pb in detect_frames(gray, lh) + detect_shaded_panels(color, lh):
-                inside = [p for b in blocks for p in b.paragraphs if not p.is_empty() and
-                          self._inter(p.bbox, pb) > 0.5 * max(1, (p.bbox[2] - p.bbox[0]) * (p.bbox[3] - p.bbox[1]))]
+            area = lambda b: max(1, (b[2] - b[0]) * (b[3] - b[1]))
+            shaded = detect_shaded_panels(color, lh)
+            for pb in detect_frames(gray, lh) + shaded:
+                inside = [p for b in blocks for p in b.paragraphs
+                          if not p.is_empty() and self._inter(p.bbox, pb) > 0.5 * area(p.bbox)]
                 bad = [p for p in inside if text_quality(p.text, p.conf) < 0.5]
-                if len(bad) >= 2 and sum(len(p.text) for p in bad) >= 0.1 * max(1, sum(len(p.text) for p in inside)):
-                    log.info("khung nền %s chứa chữ rác -> hình", pb)
+                garbage = len(bad) >= 2 and sum(len(p.text) for p in bad) >= 0.1 * max(1, sum(len(p.text) for p in inside))
+                drawing = pb in shaded and (
+                    any(self._inter(t.bbox, pb) > 0.5 * area(t.bbox) for t in tables) or
+                    any(self._inter(fb, pb) > 0.5 * area(fb) and area(fb) > 0.05 * area(pb) for fb in fig_boxes))
+                if garbage or drawing:
+                    if drawing:
+                        # đoạn văn thân bài nằm dưới phần sơ đồ giữ là chữ: thu hộp lại
+                        draw = [t.bbox for t in tables if self._inter(t.bbox, pb) > 0.5 * area(t.bbox)] + \
+                            [fb for fb in fig_boxes if self._inter(fb, pb) > 0.5 * area(fb)]
+                        db = max(b[3] for b in draw)
+                        body = [p.bbox for p in inside if len(p.lines) >= 3 and
+                                (p.bbox[2] - p.bbox[0]) >= 0.6 * content_w and text_quality(p.text, p.conf) >= 0.8]
+                        below = [b[1] for b in body if b[1] > db]
+                        pb = (pb[0], pb[1], pb[2], int(min(below) - 0.3 * lh) if below else pb[3])
+                        # viền phải/dưới của hộp thường nhạt, bị đứt -> mở rộng tới nội dung nằm cùng dải dọc
+                        from .document import union_bbox as _ub
+                        near = [p.bbox for b in blocks for p in b.paragraphs if not p.is_empty() and
+                                p.bbox[1] >= pb[1] - lh and p.bbox[3] <= pb[3] + lh and
+                                self._gap(p.bbox, pb) < 0.25 * content_w and len(p.text.split()) <= 25]
+                        near += [fb for fb in fig_boxes if self._inter(fb, pb) > 0]
+                        pb = _ub([pb] + near)
+                    log.info("hộp minh hoạ %s -> hình", pb)
                     fig_boxes.append(pb)
         if not fig_boxes:
             return real_tables, []
@@ -313,6 +337,28 @@ class Pipeline:
             if sum(len(ln.text) for ln in good) < 150:
                 from .document import union_bbox as _ub
                 fig_boxes = [_ub(fig_boxes + [ln.bbox for ln in rest])] if rest else [_ub(fig_boxes)]
+        # chú thích đặt cạnh hình (Word không đặt được chữ song song với ảnh, sẽ đẩy xuống dưới và tràn trang)
+        if color is not None and fig_boxes:
+            from .document import union_bbox as _ub
+            for _ in range(2):
+                grown = list(fig_boxes)
+                for b in blocks:
+                    for p in b.paragraphs:
+                        if p.is_empty() or len(p.lines) > 4 or len(p.text.split()) > 25 or \
+                                any(CAPTION_RE.match(ln.text) for ln in p.lines):
+                            continue
+                        pb = p.bbox
+                        if (pb[2] - pb[0]) > 0.45 * content_w:
+                            continue
+                        for k, fb in enumerate(grown):
+                            beside = pb[1] >= fb[1] - 0.5 * lh and pb[3] <= fb[3] + 0.5 * lh and \
+                                (pb[0] >= fb[2] - lh or pb[2] <= fb[0] + lh) and self._gap(pb, fb) < 3 * lh
+                            if beside:
+                                grown[k] = _ub([fb, pb])
+                                break
+                if grown == fig_boxes:
+                    break
+                fig_boxes = merge_regions(grown, gap=1.5 * lh)
         # bảng thật nằm trong hình -> thuộc hình
         kept = []
         for t in real_tables:
@@ -342,6 +388,28 @@ class Pipeline:
         return out
 
     @staticmethod
+    def _drop_lone_glyphs(blocks: List[Block], lh: float, h: int) -> List[Block]:
+        """Một hai ký tự đứng riêng giữa trang, cao/thấp bất thường hoặc tin cậy thấp: mũi tên, chấm, vết bẩn."""
+        for b in blocks:
+            keep = []
+            for p in b.paragraphs:
+                t = p.text.strip()
+                if 0 < len(t) <= 2 and len(p.lines) == 1 and 0.1 * h < p.bbox[1] and p.bbox[3] < 0.9 * h:
+                    ph = p.bbox[3] - p.bbox[1]
+                    if ph > 1.3 * lh or ph < 0.4 * lh or p.conf < 80:
+                        continue
+                keep.append(p)
+            b.paragraphs = keep
+        return [b for b in blocks if b.paragraphs]
+
+    @staticmethod
+    def _stray_word(wd) -> bool:
+        t = wd.text
+        if wd.conf < 70 and t and all(c in ":;|!'`~¦" for c in t):
+            return True
+        return wd.conf < 40 and (len(t) <= 2 or not any(c.isalnum() for c in t))
+
+    @staticmethod
     def _noise_line(ln) -> bool:
         if not ln.words:
             return False
@@ -357,6 +425,13 @@ class Pipeline:
         bw = binarize_ink(gray)
         figs: List[BBox] = []
         allp = [p for b in blocks for p in b.paragraphs if not p.is_empty()]
+        # vệt viền khung đọc thành ký tự ở đầu/cuối dòng ("TÌ PBR...", ": : *Lợi...")
+        for p in allp:
+            for ln in p.lines:
+                while len(ln.words) >= 3 and self._stray_word(ln.words[0]):
+                    ln.words = ln.words[1:]
+                while len(ln.words) >= 3 and self._stray_word(ln.words[-1]):
+                    ln.words = ln.words[:-1]
         # dòng rác ở đầu/cuối một đoạn tốt (lốm đốm nền dính vào đoạn)
         for p in allp:
             while len(p.lines) >= 2 and self._noise_line(p.lines[0]):
@@ -366,7 +441,13 @@ class Pipeline:
         drop = set()
         for p in allp:
             text = p.text
-            if CAPTION_RE.match(text) or p.conf >= 65:
+            if CAPTION_RE.match(text):
+                continue
+            if len(text.strip()) <= 2 and len(p.lines) == 1 and p.conf < 80 and \
+                    0.1 * h < p.bbox[1] and p.bbox[3] < 0.9 * h:
+                drop.add(id(p))  # ký tự lẻ giữa trang: mũi tên, dấu chấm đọc thành "1", "4"
+                continue
+            if p.conf >= 65:
                 continue
             chars = [c for c in text if not c.isspace()]
             alnum = sum(c.isalnum() for c in chars)
@@ -443,6 +524,8 @@ class Pipeline:
                 if tiny and any(self._gap(bb, fb) < lh for fb in fig_boxes):
                     continue  # mảnh nhãn của hình
                 chars = [c for c in blk.text if not c.isspace()]
+                if len(chars) <= 2 and 0.1 * h < bb[1] and bb[3] < 0.9 * h:
+                    continue  # ký tự lẻ giữa trang
                 if sum(not c.isalnum() for c in chars) > 0.3 * len(chars):
                     continue  # chủ yếu ký hiệu: vết bẩn, mũi tên
                 if blk.conf >= 60 and text_quality(blk.text, blk.conf) >= 0.5:

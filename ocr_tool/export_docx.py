@@ -120,7 +120,8 @@ class DocxExporter:
             doc.add_paragraph()
         for el in page.elements:
             if isinstance(el, Paragraph):
-                self._write_paragraph(doc, page, el)
+                if not el.is_empty():
+                    self._write_paragraph(doc, page, el)
             elif isinstance(el, Table):
                 self._write_table(doc, page, el)
             elif isinstance(el, Figure):

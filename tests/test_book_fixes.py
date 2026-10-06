@@ -156,3 +156,35 @@ def test_noise_paragraphs_dropped():
     figs = Pipeline(Options())._drop_noise(gray, blocks, 40)
     assert figs == []
     assert [p.text for p in blocks[0].paragraphs] == [good.text]
+
+
+def test_shaded_panel_frame_detected():
+    """Hộp minh hoạ viền xám dày (bị làm phẳng mất trước OCR) phải được tìm thấy trên ảnh gốc."""
+    import numpy as np
+
+    from ocr_tool.figures import detect_shaded_panels
+
+    img = np.full((3000, 2200, 3), 255, np.uint8)
+    img[400:2400, 300:1900] = 200          # viền xám dày ~50px
+    img[450:2350, 350:1850] = 255
+    img[1000:1010, 500:1600] = 0           # nét vẽ bên trong
+    panels = detect_shaded_panels(img, 40)
+    assert len(panels) == 1
+    x0, y0, x1, y1 = panels[0]
+    assert abs(x0 - 300) < 30 and abs(y0 - 400) < 30 and abs(x1 - 1900) < 30 and abs(y1 - 2400) < 30
+    plain = np.full((3000, 2200, 3), 255, np.uint8)
+    plain[500:520, 300:1900] = 0           # chỉ có một đường kẻ
+    assert detect_shaded_panels(plain, 40) == []
+
+
+def test_lone_glyphs_and_border_strays():
+    from ocr_tool.document import Line, Word
+    from ocr_tool.engine import Block
+
+    arrow = Paragraph(lines=[Line([Word("1", 1200, 1980, 60, 90, 94)])])
+    page_no = Paragraph(lines=[Line([Word("23", 2000, 150, 60, 40, 90)])])
+    blocks = Pipeline._drop_lone_glyphs([Block([arrow, page_no])], 50, 3500)
+    assert [p.text for p in blocks[0].paragraphs] == ["23"]
+    assert Pipeline._stray_word(Word(":", 280, 2520, 10, 30, 55))
+    assert Pipeline._stray_word(Word("TÌ", 280, 1620, 40, 50, 30))
+    assert not Pipeline._stray_word(Word("PBR", 330, 1620, 90, 50, 90))

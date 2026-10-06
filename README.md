@@ -131,6 +131,8 @@ thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần n
 | Chữ rác `ye Ges <i`, `+, 14 wy` quanh hộp minh hoạ; chữ in bóng bị đọc 2 lần | nền xám lốm đốm và bóng viền hộp bị OCR thành chữ tin cậy thấp | bỏ đoạn tin cậy thấp có dạng rác (nếu bên dưới có nét vẽ thật thì giữ làm hình); bỏ đoạn đọc trùng nằm trong đoạn tốt hơn |
 | Sơ đồ "9 dòng chảy" thành 2 bảng đầy ký hiệu lạ | khung sơ đồ có lưới giống bảng; mũi tên đọc thành `¬ ~ — * @` | "bảng" có nhiều ký hiệu sơ đồ -> giữ làm hình; `¬` giữa hai từ -> `→` |
 | Đoạn có chữ đậm vẫn tràn 1 dòng | chữ đậm gốc rộng hơn, dùng chung cỡ chữ trang làm dòng bị ngắt thêm | co khoảng cách ký tự cho riêng đoạn đó; tắt chống dòng mồ côi; chừa lề dưới |
+| Hộp minh hoạ có sơ đồ bị cắt vụn thành bảng + chữ rời, chữ cạnh hình bị đẩy xuống làm tràn trang | viền xám của hộp bị bước làm phẳng nền xoá; Word không đặt chữ song song với ảnh | dò viền/nền xám trên ảnh gốc; hộp có sơ đồ -> giữ cả hộp làm hình (đoạn thân bài phía dưới vẫn là chữ); chú thích đặt cạnh hình gộp vào hình |
+| Ký tự lẻ `1`, `4`, `TÌ`, `: :` giữa trang | mũi tên, chấm, vệt viền khung đọc thành chữ | bỏ ký tự đứng riêng có cỡ bất thường/tin cậy thấp; bỏ ký hiệu lạc ở đầu/cuối dòng |
 | Mục lục `....lO5`, `...LOS` | số trang bị đọc thành chữ | đổi chữ giống số (l, O, S, I…) về số khi đứng sau dấu dẫn |
 
 ## 5. Sửa chính tả tiếng Việt sau OCR
