@@ -3,6 +3,7 @@ OCR lại các dòng có độ tin cậy thấp."""
 from __future__ import annotations
 
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -16,6 +17,11 @@ from .document import Line, Paragraph, Word, union_bbox
 from .lang import choose_lang, script_profile, to_tesseract_langs
 
 log = logging.getLogger(__name__)
+
+# Tesseract dùng OpenMP: khi nhiều tiến trình chạy cùng lúc (hoặc máy đang bận) các luồng chờ quay
+# (busy-wait) tranh CPU làm chậm hàng trăm lần (đo được: 2,2 s -> > 8 phút). 1 luồng/tiến trình
+# không chậm hơn khi chạy đơn lẻ và cho phép OCR song song nhiều trang.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 
 @dataclass

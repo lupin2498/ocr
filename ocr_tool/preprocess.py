@@ -50,30 +50,82 @@ def _load_multiframe(p: Path) -> List[LoadedImage]:
 
 
 def _load_pdf(p: Path, dpi: int, use_pdf_text: bool = True) -> List[LoadedImage]:
+    return list(iter_pdf(p, dpi, use_pdf_text))
+
+
+def iter_pdf(p: Path, dpi: int, use_pdf_text: bool = True):
+    """Đọc PDF lần lượt từng trang (không giữ ảnh cả cuốn trong bộ nhớ – sách 230 trang ~6 GB)."""
     try:
         import pymupdf as fitz  # type: ignore
     except ImportError:  # pragma: no cover
         import fitz  # type: ignore
-    out: List[LoadedImage] = []
     doc = fitz.open(str(p))
     zoom = dpi / 72.0
-    for i, page in enumerate(doc):
+    try:
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 3:
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            elif pix.n == 4:
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            li = LoadedImage(np.ascontiguousarray(arr), float(dpi), str(p), i)
+            del pix
+            if use_pdf_text:
+                try:
+                    from .pdftext import extract_page
+                    li.pdf_text = extract_page(page, zoom)
+                except Exception:  # noqa: BLE001 - lớp chữ hỏng thì OCR như bình thường
+                    li.pdf_text = None
+            yield li
+    finally:
+        doc.close()
+
+
+def render_pdf_page(path: str, index: int, dpi: int = 300, use_pdf_text: bool = True) -> LoadedImage:
+    """Dựng một trang PDF (dùng cho OCR song song)."""
+    try:
+        import pymupdf as fitz  # type: ignore
+    except ImportError:  # pragma: no cover
+        import fitz  # type: ignore
+    with fitz.open(path) as doc:
+        page = doc[index]
+        zoom = dpi / 72.0
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        if pix.n == 3:
-            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-        elif pix.n == 4:
-            arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-        li = LoadedImage(np.ascontiguousarray(arr), float(dpi), str(p), i)
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if pix.n == 3 else cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR) \
+            if pix.n == 4 else arr
+        li = LoadedImage(np.ascontiguousarray(arr), float(dpi), path, index)
         if use_pdf_text:
             try:
                 from .pdftext import extract_page
                 li.pdf_text = extract_page(page, zoom)
-            except Exception:  # noqa: BLE001 - lớp chữ hỏng thì OCR như bình thường
+            except Exception:  # noqa: BLE001
                 li.pdf_text = None
-        out.append(li)
-    doc.close()
-    return out
+        return li
+
+
+def iter_inputs(path: str, pdf_dpi: int = 300, use_pdf_text: bool = True):
+    p = Path(path)
+    if p.suffix.lower() in PDF_EXTS:
+        yield from iter_pdf(p, pdf_dpi, use_pdf_text)
+    else:
+        yield from load_inputs(path, pdf_dpi, use_pdf_text)
+
+
+def count_pages(path: str) -> int:
+    p = Path(path)
+    if p.suffix.lower() in PDF_EXTS:
+        try:
+            import pymupdf as fitz  # type: ignore
+        except ImportError:  # pragma: no cover
+            import fitz  # type: ignore
+        with fitz.open(str(p)) as d:
+            return d.page_count
+    if p.suffix.lower() in (".tif", ".tiff", ".gif"):
+        with Image.open(p) as im:
+            return getattr(im, "n_frames", 1)
+    return 1
 
 
 def _pil_dpi(im: Image.Image) -> Optional[float]:

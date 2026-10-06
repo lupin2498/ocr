@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from statistics import median
 from typing import Callable, List, Optional, Sequence
@@ -13,7 +14,7 @@ from .document import BBox, Element, Figure, Line, Page, Paragraph, Table, Table
 from .engine import Block, TesseractEngine
 from .lang import choose_lang
 from .layout import build_page
-from .preprocess import LoadedImage, load_inputs, preprocess
+from .preprocess import LoadedImage, count_pages, iter_inputs, load_inputs, preprocess
 from .figures import (CAPTION_RE, crop_figure, detect_figures, merge_regions, table_is_figure,
                       text_quality)
 from .ocr_cleanup import clean_ocr_text
@@ -41,6 +42,7 @@ class Options:
     psm: int = 3
     use_pdf_text: bool = True       # PDF có lớp chữ: đọc trực tiếp (kể cả mã TCVN3) thay vì OCR
     detect_figures: bool = True     # nhận diện hình vẽ/ảnh và giữ nguyên dạng ảnh
+    workers: int = 0                # số tiến trình OCR song song cho PDF nhiều trang (0 = tự động)
     spellfix: bool = True           # sửa chính tả tiếng Việt sau OCR
     progress: Optional[Callable[[str], None]] = None
 
@@ -56,14 +58,43 @@ class Pipeline:
 
     # ------------------------------------------------------------------ vào/ra
     def process_file(self, path: str) -> List[Page]:
-        images = load_inputs(path, pdf_dpi=self.opts.pdf_dpi, use_pdf_text=self.opts.use_pdf_text)
-        pages = []
-        for li in images:
-            self.progress(f"Trang {li.page_index + 1}/{len(images)} của {li.source}")
-            pages.append(self.process_image(li, fix_spelling=False))
+        n = count_pages(path)
+        workers = self._n_workers(n)
+        pages: List[Page] = []
+        if workers > 1 and path.lower().endswith(".pdf"):
+            pages = self._process_pdf_parallel(path, n, workers)
+        else:
+            for li in iter_inputs(path, pdf_dpi=self.opts.pdf_dpi, use_pdf_text=self.opts.use_pdf_text):
+                self.progress(f"Trang {li.page_index + 1}/{n} của {li.source}")
+                pages.append(self.process_image(li, fix_spelling=False))
+                del li
         strip_running_headers(pages)
         self.fix_spelling(pages)
         return pages
+
+    def _n_workers(self, n_pages: int) -> int:
+        if n_pages < 3:
+            return 1
+        w = self.opts.workers or max(1, min(4, (os.cpu_count() or 2) - 1))
+        return max(1, min(w, n_pages))
+
+    def _process_pdf_parallel(self, path: str, n: int, workers: int) -> List[Page]:
+        """OCR các trang PDF song song (mỗi tiến trình tự dựng ảnh trang của mình)."""
+        import dataclasses
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        opts = dataclasses.replace(self.opts, progress=None, workers=1)
+        results: dict = {}
+        self.progress(f"OCR song song {workers} tiến trình, {n} trang ...")
+        with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(opts,)) as ex:
+            futs = {ex.submit(_worker_page, path, i): i for i in range(n)}
+            done = 0
+            for fut in as_completed(futs):
+                i = futs[fut]
+                results[i] = fut.result()
+                done += 1
+                self.progress(f"Xong trang {done}/{n} (trang {i + 1})")
+        return [results[i] for i in range(n)]
 
     def fix_spelling(self, pages: List[Page]) -> None:
         """Sửa chính tả tiếng Việt cho cả tài liệu (dùng ngữ cảnh toàn tài liệu)."""
@@ -492,6 +523,20 @@ class Pipeline:
             elements.append(p)
         elements.extend(pending)
         return elements
+
+
+_WORKER_PIPE: Optional["Pipeline"] = None
+
+
+def _worker_init(opts: Options) -> None:
+    global _WORKER_PIPE
+    _WORKER_PIPE = Pipeline(opts)
+
+
+def _worker_page(path: str, index: int) -> Page:
+    from .preprocess import render_pdf_page
+    li = render_pdf_page(path, index, _WORKER_PIPE.opts.pdf_dpi, _WORKER_PIPE.opts.use_pdf_text)
+    return _WORKER_PIPE.process_image(li, fix_spelling=False)
 
 
 def _norm_key(text: str) -> str:

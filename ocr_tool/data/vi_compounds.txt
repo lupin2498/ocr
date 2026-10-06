@@ -388,3 +388,89 @@ hạt dầu
 chuyển tiếp
 công tác
 độ rỗng
+# --- cụm cố định giúp phân biệt chữ có mũ hay bị mất dấu (vẫn/vân, cần/cân, phần/phân, rồi/rỗi, bất/bắt...) ---
+vẫn còn
+vẫn là
+vẫn được
+vẫn có
+vẫn không
+vẫn chưa
+vẫn đang
+vẫn sẽ
+vẫn phải
+cần phải
+cần có
+cần dùng
+cần biết
+cần làm
+cần được
+không cần
+chỉ cần
+cần lưu ý
+cần thiết
+một phần
+phần lớn
+phần còn lại
+phần này
+phần nào
+thành phần
+phần mềm
+rồi lại
+rồi sẽ
+rồi tại
+sau đó rồi
+bất cứ
+bất kỳ
+bất kể
+bất ngờ
+bất động sản
+bất lợi
+hẳn là
+chắc hẳn
+cũng như
+cũng là
+cũng có
+cũng không
+nhiều người
+mọi người
+người ta
+thế nào
+như thế
+như vậy
+vì thế
+bởi thế
+tuy nhiên
+mặc dù
+thậm chí
+dẫu vậy
+dẫu sao
+tất cả
+cả hai
+bao gồm
+bao nhiêu
+lần đầu
+đầu tiên
+nhìn lần
+cụ thể
+hiểu được
+hiểu rõ
+giải thích
+giới thiệu
+tính bằng
+xét theo
+trình tự
+thực chất
+điểm chung
+hàng lưu kho
+lưu kho
+khoản phải thu
+khoản phải trả
+nợ phải thu
+phiếu đề nghị
+đề nghị thanh toán
+thanh toán
+phát hành
+ngắn hạn
+dài hạn
+vốn lưu động
+trục thời gian
