@@ -135,6 +135,8 @@ thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần n
 | Ký tự lẻ `1`, `4`, `TÌ`, `: :` giữa trang | mũi tên, chấm, vệt viền khung đọc thành chữ | bỏ ký tự đứng riêng có cỡ bất thường/tin cậy thấp; bỏ ký hiệu lạc ở đầu/cuối dòng |
 | Số trang `| 101` và tiêu đề chạy "PHẦN II: XÃ HỘI ĐÒI HỎI…" nằm lẫn trong thân văn bản | số trang dính ký tự rác nên không khớp mẫu; sách chia 3 phần nên mỗi tiêu đề chỉ lặp ~35/230 trang, dưới ngưỡng 15% | nhận số trang nhờ chạy đều theo thứ tự trang; ngưỡng lặp tối đa 6 trang; bỏ phiếu từng từ giữa các bản OCR để có tiêu đề đúng, đưa vào header Word |
 | `nều`, `tót`, `hòi`, `xìn mời đì`, `củakỳ`, `CôngtY` không được sửa | âm tiết đúng luật nhưng rất hiếm; hai từ bị dính; từ điển từ ghép chỉ có ~480 mục | luật âm tiết hiếm (so tần suất), tách từ dính, thêm ~25.000 từ của pyvi làm ngữ cảnh; xét cả từ cuối dòng trước/đầu dòng sau (`chỉ \| phí` → `chi phí`, `vấn \| đề`) |
+| Tiêu đề bìa phông trang trí ra `BAN PO VE DONG TIEN` | mô hình tiếng Anh "tự tin" hơn với bản không dấu | bản tiếng Việt có cùng chữ cái, chỉ thêm dấu được chấp nhận dù độ tin cậy thấp hơn tới 15 điểm |
+| Biểu đồ / hộp công thức ra chữ vụn nhiều cột, hàng nhãn biểu đồ thành đoạn văn | chữ xếp cột trong hộp; hàng nhãn sát hình có khoảng cách từ lớn | hộp có ≥3 dòng chia cột → hình (tiêu đề phía trên vẫn là chữ); hàng nhãn thẳng cột sát hình gộp vào hình |
 | Mục lục `....lO5`, `...LOS` | số trang bị đọc thành chữ | đổi chữ giống số (l, O, S, I…) về số khi đứng sau dấu dẫn |
 
 ## 5. Sửa chính tả tiếng Việt sau OCR

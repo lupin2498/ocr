@@ -227,7 +227,7 @@ def detect_shaded_panels(color: np.ndarray, lh: float, min_frac: float = 0.03) -
     h, w = g.shape[:2]
     f = 4
     small = cv2.resize(g, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
-    k = max(3, int(0.3 * lh / f) | 1)  # rộng hơn nét chữ, hẹp hơn viền khung
+    k = 3  # ~12px ở 300dpi: rộng hơn nét chữ thường, hẹp hơn viền khung
     filled = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     paper = float(np.percentile(small, 90))
     mask = (filled < paper - _PANEL_DELTA).astype(np.uint8) * 255

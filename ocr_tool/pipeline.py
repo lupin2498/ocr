@@ -322,15 +322,30 @@ class Pipeline:
                           if not p.is_empty() and self._inter(p.bbox, pb) > 0.5 * area(p.bbox)]
                 bad = [p for p in inside if text_quality(p.text, p.conf) < 0.5]
                 garbage = len(bad) >= 2 and sum(len(p.text) for p in bad) >= 0.1 * max(1, sum(len(p.text) for p in inside))
+                # chữ xếp nhiều cột trong hộp (ô công thức, nhãn sơ đồ) -> Word không dựng lại được bố cục
+                multicol = [ln.bbox for p in inside for ln in p.lines if len(ln.words) >= 2 and
+                            max(b.left - a.right for a, b in zip(ln.words, ln.words[1:])) > 1.5 * lh]
                 drawing = pb in shaded and (
                     any(self._inter(t.bbox, pb) > 0.5 * area(t.bbox) for t in tables) or
-                    any(self._inter(fb, pb) > 0.5 * area(fb) and area(fb) > 0.05 * area(pb) for fb in fig_boxes))
+                    any(self._inter(fb, pb) > 0.5 * area(fb) and area(fb) > 0.05 * area(pb) for fb in fig_boxes)
+                    or len(multicol) >= 3)
                 if garbage or drawing:
                     if drawing:
                         # đoạn văn thân bài nằm dưới phần sơ đồ giữ là chữ: thu hộp lại
                         draw = [t.bbox for t in tables if self._inter(t.bbox, pb) > 0.5 * area(t.bbox)] + \
-                            [fb for fb in fig_boxes if self._inter(fb, pb) > 0.5 * area(fb)]
+                            [fb for fb in fig_boxes if self._inter(fb, pb) > 0.5 * area(fb)] + \
+                            (multicol if len(multicol) >= 3 else [])
                         db = max(b[3] for b in draw)
+                        dt = min(b[1] for b in draw)
+                        # tiêu đề / đoạn văn nằm trên phần sơ đồ (chữ liền mạch, không chia cột) giữ là chữ
+                        heads = [p.bbox for p in inside if p.bbox[3] < dt and
+                                 text_quality(p.text, p.conf) >= 0.8 and p.conf >= 70 and
+                                 not any(ln.bbox in multicol for ln in p.lines) and
+                                 all(max([b.left - a.right for a, b in zip(ln.words, ln.words[1:])] or [0]) < 1.5 * lh
+                                     for ln in p.lines)]
+                        others_above = [p.bbox for p in inside if p.bbox[3] < dt and p.bbox not in heads]
+                        if heads and not any(o[1] < max(h[3] for h in heads) for o in others_above):
+                            pb = (pb[0], int(max(h[3] for h in heads) + 0.3 * lh), pb[2], pb[3])
                         body = [p.bbox for p in inside if len(p.lines) >= 3 and
                                 (p.bbox[2] - p.bbox[0]) >= 0.6 * content_w and text_quality(p.text, p.conf) >= 0.8]
                         below = [b[1] for b in body if b[1] > db]
@@ -380,6 +395,31 @@ class Pipeline:
                 if grown == fig_boxes:
                     break
                 fig_boxes = merge_regions(grown, gap=1.5 * lh)
+        # hàng nhãn của biểu đồ ngay sát hình (chữ cách nhau xa, thẳng cột với hình): thuộc hình
+        if color is not None and fig_boxes:
+            from statistics import median as _med
+            for _ in range(3):
+                changed = False
+                for b in blocks:
+                    for p in b.paragraphs:
+                        rows = [ln for ln in p.lines if len(ln.words) >= 2]
+                        if p.is_empty() or not rows or len(rows) < 0.5 * len(p.lines):
+                            continue
+                        spread = [_med([w2.left - w1.right for w1, w2 in zip(ln.words, ln.words[1:])]) for ln in rows]
+                        if sum(g >= 0.8 * lh for g in spread) < 0.5 * len(rows):
+                            continue
+                        pb = p.bbox
+                        for k, fb in enumerate(fig_boxes):
+                            # hình có thể bị cắt thiếu cột cuối: cho hàng nhãn thò ra bên phải tới 25%
+                            span = 0.05 * (fb[2] - fb[0])
+                            if pb[0] >= fb[0] - span and pb[2] <= fb[2] + 0.25 * (fb[2] - fb[0]) \
+                                    and self._gap(pb, fb) < lh \
+                                    and not (fb[0] <= pb[0] and fb[1] <= pb[1] and pb[2] <= fb[2] and pb[3] <= fb[3]):
+                                fig_boxes[k] = union_bbox([fb, pb])
+                                changed = True
+                                break
+                if not changed:
+                    break
         # bảng thật nằm trong hình -> thuộc hình
         kept = []
         for t in real_tables:
@@ -464,8 +504,9 @@ class Pipeline:
             text = p.text
             if CAPTION_RE.match(text):
                 continue
-            if len(p.lines) >= 2 and (p.bbox[2] - p.bbox[0]) < 1.5 * lh and \
-                    max(len(ln.text) for ln in p.lines) <= 6:
+            pw, ph = p.bbox[2] - p.bbox[0], p.bbox[3] - p.bbox[1]
+            if (len(p.lines) >= 2 and pw < 1.5 * lh and max(len(ln.text) for ln in p.lines) <= 6) or \
+                    (pw < 0.5 * lh and ph > 2 * lh):
                 drop.add(id(p))  # dải "chữ" hẹp nhiều dòng (SR / ty / a): vệt nền xám hoặc viền hộp
                 continue
             if len(text.strip()) <= 2 and len(p.lines) == 1 and p.conf < 80 and \
@@ -634,10 +675,14 @@ class Pipeline:
     def _remove_words_in(blocks: List[Block], boxes: List[BBox]) -> List[Block]:
         for blk in blocks:
             for p in blk.paragraphs:
+                before = sum(len(ln.words) for ln in p.lines)
                 for ln in p.lines:
                     ln.words = [wd for wd in ln.words
                                 if not any(b[0] <= wd.cx <= b[2] and b[1] <= wd.cy <= b[3] for b in boxes)]
                 p.lines = [ln for ln in p.lines if ln.words]
+                after = sum(len(ln.words) for ln in p.lines)
+                if after and after <= 3 and after <= 0.3 * before:
+                    p.lines = []  # mẩu thừa của đoạn đã nằm gần hết trong hình (";  lại" ở mép hình)
             blk.paragraphs = [p for p in blk.paragraphs if p.lines]
         return [b for b in blocks if b.paragraphs]
 
@@ -876,6 +921,7 @@ def strip_running_headers(pages: List[Page]) -> None:
         if len(hits) >= need:
             remove[id(el)] = i
             clusters[id(el)] = list(hits.values())
+    titles = {_norm_key(_canonical_header(members[0], members)) for members in clusters.values()} - {""}
     for i, pg in enumerate(pages):
         keep = []
         bands = [el.bbox for el in pg.elements if id(el) in remove]
@@ -899,11 +945,31 @@ def strip_running_headers(pages: List[Page]) -> None:
                 if edge and len(el.text) < 40 and text_quality(el.text, el.conf) < 0.4:
                     continue  # mảnh rác ở mép trang (hoa văn, viền)
             keep.append(el)
+        if titles:
+            # dòng tiêu đề chạy OCR quá nát (lẫn hoa văn, dính 2–4 dòng) nên không vào cụm: vẫn chứa phần lớn
+            # chữ của một tiêu đề chạy đã biết -> bỏ
+            kept2 = []
+            for el in keep:
+                if isinstance(el, Paragraph) and el.lang != "pdf" and el.bbox[3] < 0.10 * pg.height_px \
+                        and len(el.lines) <= 5 and _covers_title(_norm_key(el.text), titles):
+                    continue
+                kept2.append(el)
+            keep = kept2
         if len(keep) != len(pg.elements):
             log.info("trang %d: bỏ %d dòng tiêu đề chạy / rác ở mép", i + 1, len(pg.elements) - len(keep))
             pg.elements = keep
             from .layout import _compute_margins
             _compute_margins(pg)
+
+
+def _covers_title(key: str, titles) -> bool:
+    """Phần lớn (theo bộ ba ký tự, không kể thứ tự) chữ của một tiêu đề chạy đã biết có trong `key`."""
+    grams = {key[k:k + 3] for k in range(len(key) - 2)}
+    for t in titles:
+        tg = {t[k:k + 3] for k in range(len(t) - 2)}
+        if len(tg) >= 8 and len(tg & grams) >= 0.55 * len(tg):
+            return True
+    return False
 
 
 def _canonical_header(el: Paragraph, members: List[Paragraph]) -> str:

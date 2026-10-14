@@ -47,6 +47,18 @@ class Block:
         return sum(p.conf for p in ps) / len(ps) if ps else 0.0
 
 
+def _same_letters(a: str, b: str) -> bool:
+    """Hai chuỗi giống nhau khi bỏ dấu tiếng Việt (và chữ Cyrillic trông như Latin)."""
+    import difflib
+
+    from .ocr_cleanup import fix_homoglyphs
+    from .vnsyllable import skeleton
+
+    ka = "".join(skeleton(w) for w in fix_homoglyphs(a).lower().split())
+    kb = "".join(skeleton(w) for w in fix_homoglyphs(b).lower().split())
+    return bool(ka) and difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.75
+
+
 class TesseractEngine:
     def __init__(self, langs: Sequence[str] = ("vi", "en", "ru"), tesseract_cmd: Optional[str] = None,
                  tessdata_dir: Optional[str] = None, oem: int = 1,
@@ -311,6 +323,10 @@ class TesseractEngine:
                     old_marks = script_profile(best.text)["viet"]
                     if new_marks > old_marks:
                         margin, prefer_marks = 8.0, True
+                        # cùng chữ cái, chỉ thêm dấu ("BAN PO VE DONG TIEN" -> "BẢN ĐỒ VỀ DÒNG TIỀN"):
+                        # bản không dấu của tiêu đề phông trang trí thường "tự tin" hơn hẳn mà vẫn sai
+                        if old_marks == 0 and new_marks >= 3 and _same_letters(best.text, new_blk.text):
+                            margin = 15.0
                     elif new_marks < old_marks:
                         continue  # không lùi về bản ít dấu hơn
                 if new_conf >= best_conf - margin and (best is blk or new_conf > best_conf or prefer_marks):
