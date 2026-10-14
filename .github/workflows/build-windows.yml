@@ -119,12 +119,17 @@ jobs:
           & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\OCR2Word.iss
           Get-ChildItem dist\installer
 
+      # Bản phát hành đã chứa file cài đặt; artifact chỉ cho lần push thường, giữ 2 ngày
+      # (mỗi bản ~380 MB, giữ lâu sẽ hết hạn mức lưu trữ và làm hỏng cả bước phát hành)
       - name: Lưu kết quả build
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: OCR2Word-${{ steps.ver.outputs.version }}-windows
           path: dist/installer/*
           if-no-files-found: error
+          retention-days: 2
 
       - name: Phát hành (Release)
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
