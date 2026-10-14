@@ -4,9 +4,11 @@ from __future__ import annotations
 import difflib
 import logging
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from statistics import median
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -19,7 +21,7 @@ from .preprocess import LoadedImage, count_pages, iter_inputs, load_inputs, prep
 from .figures import (CAPTION_RE, binarize_ink, crop_figure, detect_figures, detect_frames, detect_shaded_panels, merge_regions, table_is_figure,
                       text_quality)
 from .ocr_cleanup import clean_ocr_text
-from .spellfix import DocModel, SpellFixer, get_lexicon, is_vietnamese_text
+from .spellfix import DocModel, SpellFixer, get_lexicon, is_vietnamese_text, line_context
 from .tables import TableGrid, detect_tables, grid_line_mask
 
 log = logging.getLogger(__name__)
@@ -128,13 +130,17 @@ class Pipeline:
                 if isinstance(el, Paragraph):
                     if el.lang == "pdf":
                         continue  # chữ lấy từ lớp chữ PDF: đã chính xác
+                    raw = [ln.text for ln in el.lines if ln.words]
+                    k = -1
                     for ln in el.lines:
                         if not ln.words:
                             continue
+                        k += 1
                         old = ln.text
                         new = clean_ocr_text(old)
                         if is_vietnamese_text(new):
-                            new = fixer.fix_line(new)
+                            left, right = line_context(raw, k)
+                            new = fixer.fix_line(new, left=left, right=right)
                         if new != old:
                             b = ln.bbox
                             conf = ln.conf
@@ -143,6 +149,11 @@ class Pipeline:
                     for c in el.cells:
                         cl = [clean_ocr_text(t) for t in c.lines]
                         c.lines = [fixer.fix_line(t) if is_vietnamese_text(t) else t for t in cl if t.strip()]
+        for pg in pages:  # tiêu đề chạy đã chuyển vào header: "102 | PHẨN I: ..." -> chỉ sửa phần chữ
+            if pg.header_text and not pg.header_text.isdigit():
+                parts = pg.header_text.split(" | ")
+                parts = [fixer.fix_line(clean_ocr_text(t)) if is_vietnamese_text(t) else t for t in parts]
+                pg.header_text = " | ".join(parts)
         n = sum(fixer.changes.values())
         if n:
             log.info("đã sửa %d lỗi chính tả", n)
@@ -202,9 +213,19 @@ class Pipeline:
                 figures = [Figure(bbox=b, image=crop_figure(pre.color, b)) for b in fig_boxes]
             # Tesseract hay bỏ sót dòng chữ nằm sát ảnh: đọc lại các vùng mực chưa được nhận dạng
             if text_layer is None:
-                blocks = blocks + self._recover_missed_text(
+                found = self._recover_missed_text(
                     gray, blocks, [f.bbox for f in figures], [t.bbox for t in tables] + [g.bbox for g in grids],
                     text_h)
+                # nhãn ngắn sát mép hình = phần của hình bị cắt thiếu (viền hộp nhạt): nới hình ra, không giữ chữ
+                for blk in list(found):
+                    bb = blk.bbox
+                    near = [f for f in figures if self._gap(bb, f.bbox) < text_h]
+                    if near and len(blk.text.split()) <= 4:
+                        f = near[0]
+                        f.bbox = union_bbox([f.bbox, bb])
+                        f.image = crop_figure(pre.color, f.bbox)
+                        found.remove(blk)
+                blocks = blocks + found
 
         if text_layer is None:
             blocks = self._drop_lone_glyphs(blocks, text_h, h)
@@ -443,6 +464,10 @@ class Pipeline:
             text = p.text
             if CAPTION_RE.match(text):
                 continue
+            if len(p.lines) >= 2 and (p.bbox[2] - p.bbox[0]) < 1.5 * lh and \
+                    max(len(ln.text) for ln in p.lines) <= 6:
+                drop.add(id(p))  # dải "chữ" hẹp nhiều dòng (SR / ty / a): vệt nền xám hoặc viền hộp
+                continue
             if len(text.strip()) <= 2 and len(p.lines) == 1 and p.conf < 80 and \
                     0.1 * h < p.bbox[1] and p.bbox[3] < 0.9 * h:
                 drop.add(id(p))  # ký tự lẻ giữa trang: mũi tên, dấu chấm đọc thành "1", "4"
@@ -524,6 +549,8 @@ class Pipeline:
                 if tiny and any(self._gap(bb, fb) < lh for fb in fig_boxes):
                     continue  # mảnh nhãn của hình
                 chars = [c for c in blk.text if not c.isspace()]
+                if (bb[2] - bb[0]) < 1.5 * lh and len(blk.text.splitlines()) >= 2:
+                    continue  # dải chữ hẹp nhiều dòng: vệt nền / viền, không phải chữ
                 if len(chars) <= 2 and 0.1 * h < bb[1] and bb[3] < 0.9 * h:
                     continue  # ký tự lẻ giữa trang
                 if sum(not c.isalnum() for c in chars) > 0.3 * len(chars):
@@ -765,42 +792,106 @@ def _norm_key(text: str) -> str:
     return t
 
 
+def _edge_zone(pg: Page, b: BBox, frac: float = 0.10) -> Optional[str]:
+    if b[3] < frac * pg.height_px:
+        return "top"
+    if b[1] > (1 - frac) * pg.height_px:
+        return "bottom"
+    return None
+
+
+_NUM_RE = re.compile(r"(?<![\d.,])(\d{1,4})(?![\d.,%])")
+
+
+def _extract_page_numbers(pages: List[Page]) -> Optional[int]:
+    """Số trang in ở mép trang ("| 101", "4 BIZBOOKS [59", "170 PHẦN II: ...") nhận ra nhờ chạy đều
+    theo thứ tự trang (số = chỉ số trang + hằng số). Bỏ khỏi thân trang, đưa vào header/footer."""
+    cands = []  # (page, paragraph, line, word, number, zone)
+    for i, pg in enumerate(pages):
+        for el in pg.elements:
+            if not isinstance(el, Paragraph) or el.is_empty() or el.lang == "pdf" or len(el.lines) > 2:
+                continue
+            zone = _edge_zone(pg, el.bbox)
+            if zone is None:
+                continue
+            for ln in (el.lines[0], el.lines[-1]):
+                for wd in ln.words:
+                    for m in _NUM_RE.finditer(wd.text):
+                        cands.append((i, el, ln, wd, int(m.group(1)), zone))
+    if not cands:
+        return None
+    offsets = Counter(n - i for i, _, _, _, n, _ in cands)
+    off, cnt = offsets.most_common(1)[0]
+    pages_with = len({c[0] for c in cands})
+    if cnt < max(3, 0.3 * pages_with):
+        return None
+    found: Dict[int, str] = {}
+    for i, el, ln, wd, n, zone in cands:
+        if n - i != off or i in found:
+            continue
+        pg = pages[i]
+        found[i] = str(n)
+        if zone == "top" and not pg.header_text:
+            pg.header_text = str(n)
+        elif zone == "bottom" and not pg.footer_text:
+            pg.footer_text = str(n)
+        # bỏ số trang (và ký tự rác kèm theo như "|", "[") khỏi dòng; dòng chỉ còn rác/logo -> bỏ cả đoạn
+        ln.words = [w for w in ln.words if w is not wd and not re.fullmatch(r"[|\[\]Il!¦—–\-_.:;'`]+", w.text)]
+        rest = " ".join(w.text for w in ln.words)
+        if sum(c.isalpha() for c in rest) < 8 or len(rest.split()) <= 2:
+            pg.elements = [e for e in pg.elements if e is not el]
+    return off
+
+
 def strip_running_headers(pages: List[Page]) -> None:
-    """Tiêu đề chạy / chân trang lặp lại trên nhiều trang (tên sách, tên chương, hoa văn) -> bỏ khỏi thân
-    trang (số trang giữ ở header/footer). Mảnh chữ rác ở mép trang cũng bị loại."""
+    """Tiêu đề chạy / chân trang lặp lại trên nhiều trang (tên sách, tên phần, hoa văn) -> bỏ khỏi thân
+    trang, đưa vào header của Word (cùng số trang). Mảnh chữ rác ở mép trang cũng bị loại."""
     import difflib
 
     if len(pages) < 4:
         return
+    page_off = _extract_page_numbers(pages)
     cands = []  # (page_idx, element, key, zone)
     for i, pg in enumerate(pages):
         for el in pg.elements:
             if not isinstance(el, Paragraph) or el.is_empty() or el.lang == "pdf":
                 continue
-            b = el.bbox
-            zone = "top" if b[3] < 0.10 * pg.height_px else ("bottom" if b[1] > 0.90 * pg.height_px else None)
-            if zone is None or len(el.lines) > 3 or len(el.text) > 80:
+            zone = _edge_zone(pg, el.bbox)
+            if zone is None or len(el.lines) > 3 or len(el.text) > 90:
                 continue
             cands.append((i, el, _norm_key(el.text), zone))
-    if not cands:
-        return
-    need = max(3, int(0.15 * len(pages)))
-    remove = set()
-    for idx, (i, el, key, zone) in enumerate(cands):
+    # sách chia phần: mỗi tiêu đề phần chỉ lặp trên một đoạn sách -> ngưỡng không quá 6 trang
+    need = max(3, min(int(0.15 * len(pages)), 6))
+    remove: Dict[int, int] = {}  # id(el) -> page
+    clusters: Dict[int, List] = {}
+    for i, el, key, zone in cands:
         if len(key) < 4:
             continue
-        hits = {i}
+        hits = {i: el}
         for j, el2, key2, zone2 in cands:
             if j in hits or zone2 != zone or len(key2) < 4:
                 continue
             if difflib.SequenceMatcher(None, key, key2).ratio() >= 0.6:
-                hits.add(j)
+                hits[j] = el2
         if len(hits) >= need:
-            remove.add(id(el))
+            remove[id(el)] = i
+            clusters[id(el)] = list(hits.values())
     for i, pg in enumerate(pages):
         keep = []
+        bands = [el.bbox for el in pg.elements if id(el) in remove]
+        top_band = max((b[3] for b in bands if b[3] < 0.10 * pg.height_px), default=None)
         for el in pg.elements:
+            if id(el) not in remove and isinstance(el, Paragraph) and len(el.lines) <= 2 and (any(
+                    min(el.bbox[3], b[3]) - max(el.bbox[1], b[1]) > 0.5 * (el.bbox[3] - el.bbox[1]) for b in bands)
+                    or (top_band is not None and el.bbox[3] <= top_band)):
+                continue  # mảnh khác của cùng dòng tiêu đề chạy (OCR tách đôi) hoặc nằm phía trên nó
             if id(el) in remove:
+                if el.bbox[1] < 0.5 * pg.height_px and not (pg.header_text and not pg.header_text.isdigit()):
+                    title = _canonical_header(el, clusters[id(el)])
+                    if title:
+                        num = pg.header_text if pg.header_text.isdigit() else \
+                            (str(i + page_off) if page_off is not None and not pg.footer_text else "")
+                        pg.header_text = f"{num} | {title}" if num else title
                 continue
             if isinstance(el, Paragraph) and el.lang != "pdf" and not el.is_empty():
                 b = el.bbox
@@ -810,7 +901,27 @@ def strip_running_headers(pages: List[Page]) -> None:
             keep.append(el)
         if len(keep) != len(pg.elements):
             log.info("trang %d: bỏ %d dòng tiêu đề chạy / rác ở mép", i + 1, len(pg.elements) - len(keep))
-        pg.elements = keep
+            pg.elements = keep
+            from .layout import _compute_margins
+            _compute_margins(pg)
+
+
+def _canonical_header(el: Paragraph, members: List[Paragraph]) -> str:
+    """Bản đọc tốt nhất của một tiêu đề chạy: OCR mỗi trang sai một kiểu, nên bỏ phiếu từng từ giữa các
+    bản có cùng số từ (nhóm đông nhất), rồi mới sửa chính tả."""
+    clean = lambda t: re.sub(r"^[^\w(]+|[^\w?)!.]+$", "", " ".join(t.split()))  # noqa: E731
+    texts = [clean(m.text) for m in members] or [clean(el.text)]
+    by_len: Dict[int, List[List[str]]] = {}
+    for t in texts:
+        by_len.setdefault(len(t.split()), []).append(t.split())
+    biggest = max(len(g) for g in by_len.values())
+    # nhóm đủ đông; ưu tiên bản nhiều từ hơn (OCR hay đánh rơi "I:" chứ hiếm khi thêm từ)
+    group = max((g for g in by_len.values() if len(g) >= 0.5 * biggest), key=lambda g: (len(g[0]), len(g)))
+    if len(group) >= 3:
+        best = " ".join(Counter(col).most_common(1)[0][0] for col in zip(*group))
+    else:
+        best = max(texts, key=lambda t: (texts.count(t), text_quality(t)))
+    return best if text_quality(best) >= 0.5 else ""
 
 
 def process_files(paths: Sequence[str], opts: Options) -> List[Page]:

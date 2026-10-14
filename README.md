@@ -133,6 +133,8 @@ thay vì OCR – nhanh (cả cuốn 111 trang ~30 giây) và chính xác gần n
 | Đoạn có chữ đậm vẫn tràn 1 dòng | chữ đậm gốc rộng hơn, dùng chung cỡ chữ trang làm dòng bị ngắt thêm | co khoảng cách ký tự cho riêng đoạn đó; tắt chống dòng mồ côi; chừa lề dưới |
 | Hộp minh hoạ có sơ đồ bị cắt vụn thành bảng + chữ rời, chữ cạnh hình bị đẩy xuống làm tràn trang | viền xám của hộp bị bước làm phẳng nền xoá; Word không đặt chữ song song với ảnh | dò viền/nền xám trên ảnh gốc; hộp có sơ đồ -> giữ cả hộp làm hình (đoạn thân bài phía dưới vẫn là chữ); chú thích đặt cạnh hình gộp vào hình |
 | Ký tự lẻ `1`, `4`, `TÌ`, `: :` giữa trang | mũi tên, chấm, vệt viền khung đọc thành chữ | bỏ ký tự đứng riêng có cỡ bất thường/tin cậy thấp; bỏ ký hiệu lạc ở đầu/cuối dòng |
+| Số trang `| 101` và tiêu đề chạy "PHẦN II: XÃ HỘI ĐÒI HỎI…" nằm lẫn trong thân văn bản | số trang dính ký tự rác nên không khớp mẫu; sách chia 3 phần nên mỗi tiêu đề chỉ lặp ~35/230 trang, dưới ngưỡng 15% | nhận số trang nhờ chạy đều theo thứ tự trang; ngưỡng lặp tối đa 6 trang; bỏ phiếu từng từ giữa các bản OCR để có tiêu đề đúng, đưa vào header Word |
+| `nều`, `tót`, `hòi`, `xìn mời đì`, `củakỳ`, `CôngtY` không được sửa | âm tiết đúng luật nhưng rất hiếm; hai từ bị dính; từ điển từ ghép chỉ có ~480 mục | luật âm tiết hiếm (so tần suất), tách từ dính, thêm ~25.000 từ của pyvi làm ngữ cảnh; xét cả từ cuối dòng trước/đầu dòng sau (`chỉ \| phí` → `chi phí`, `vấn \| đề`) |
 | Mục lục `....lO5`, `...LOS` | số trang bị đọc thành chữ | đổi chữ giống số (l, O, S, I…) về số khi đứng sau dấu dẫn |
 
 ## 5. Sửa chính tả tiếng Việt sau OCR

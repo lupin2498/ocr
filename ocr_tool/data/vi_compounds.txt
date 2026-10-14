@@ -474,3 +474,5 @@ ngắn hạn
 dài hạn
 vốn lưu động
 trục thời gian
+sơ đồ
+kim van

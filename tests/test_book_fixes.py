@@ -188,3 +188,47 @@ def test_lone_glyphs_and_border_strays():
     assert Pipeline._stray_word(Word(":", 280, 2520, 10, 30, 55))
     assert Pipeline._stray_word(Word("TÌ", 280, 1620, 40, 50, 30))
     assert not Pipeline._stray_word(Word("PBR", 330, 1620, 90, 50, 90))
+
+
+def test_spellfix_rare_glued_and_cross_line():
+    lex = get_lexicon()
+    f = SpellFixer(lex, DocModel.build(["kết quả rất tốt", "một công ty rất tốt"]))
+    assert f.fix_line("Ngược lại, nều cần một ví dụ") == "Ngược lại, nếu cần một ví dụ"
+    assert f.fix_line("đang kiếm tiền rất tót") == "đang kiếm tiền rất tốt"
+    # âm tiết hiếm, không có ngữ cảnh ủng hộ ứng viên: giữ nguyên (từ hiếm nhưng đúng)
+    assert f.fix_line("có ngọn lửa phụt mạnh ra") == "có ngọn lửa phụt mạnh ra"
+    assert f.fix_line("lợi nhuận trên bình củakỳ trước") == "lợi nhuận trên bình của kỳ trước"
+    assert f.fix_line("Khách hàng CôngtY") == "Khách hàng Công ty"
+    assert f.fix_line("sau VHC tầngI), đồng thời") == "sau VHC tầng I), đồng thời"
+    assert f.fix_line("rôto và tua bin") == "rôto và tua bin"
+    # âm tiết hiếm nhưng ghép đúng với từ bên cạnh thì giữ nguyên
+    assert f.fix_line("công ty niêm yết") == "công ty niêm yết"
+    assert f.fix_line("chỉ khư khư giữ tiền") == "chỉ khư khư giữ tiền"
+    # ngữ cảnh qua chỗ xuống dòng: "dõng | dạc" là đúng, không đổi
+    assert f.fix_line("đều có thể dõng", right="dạc") == "đều có thể dõng"
+    assert f.fix_line("nếu khoản này lớn thì có vấn", right="đề") == "nếu khoản này lớn thì có vấn"
+    assert f.fix_line("đề xảy ra ngay", left="vấn") == "đề xảy ra ngay"
+
+
+def test_page_numbers_and_running_headers_to_word_header():
+    from ocr_tool.document import Line, Page, Word
+    from ocr_tool.pipeline import strip_running_headers
+
+    def para(text, y):
+        return Paragraph(lines=[Line([Word(w, 300 + 120 * k, y, 100, 40, 90) for k, w in enumerate(text.split())])])
+
+    headers = ["PHẨN lÌ: XÃ HỘI ĐÒI HÒI GÌ Ở CÔNG TY?", "PHẦN II: XÃ HỘI ĐÒI HỎI GÌ Ở CÔNG TY?",
+               "PHẨN II: XÃ HỘI ĐÒI HỎI GÌ Ở CÔNG TY?", "PHAN II: XÃ HỘI BO! HO! GÌ Ở CÔNG TY?"]
+    pages = []
+    for i in range(16):
+        els = [para(headers[(i // 2) % 4], 160) if i % 2 == 0 else para(f"| {i + 100}", 160),
+               para("Nội dung trang sách", 900)]
+        pages.append(Page(width_px=2475, height_px=3500, dpi=300, page_width_in=8.25, page_height_in=11.67,
+                          elements=els))
+    strip_running_headers(pages)
+    for i, pg in enumerate(pages):
+        assert [e.text for e in pg.elements] == ["Nội dung trang sách"]
+        if i % 2:
+            assert pg.header_text == str(i + 100)
+        else:
+            assert pg.header_text.startswith(f"{i + 100} | ") and "XÃ HỘI" in pg.header_text
