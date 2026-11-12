@@ -18,7 +18,7 @@ thụt đầu dòng, tiêu đề in đậm) và **bảng biểu** (kể cả ô 
 
 ### Cách 1 – Bộ cài sẵn (khuyên dùng, không cần Python)
 
-Vào trang **Releases** của kho mã: `https://github.com/luoin2489/desktop-tutorial/releases`
+Vào trang **Releases** của kho mã: `https://github.com/lupin2498/ocr/releases`
 
 | File | Dùng khi |
 |---|---|
