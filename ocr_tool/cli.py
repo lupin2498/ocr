@@ -8,11 +8,49 @@ from pathlib import Path
 from typing import List
 
 from . import __version__
-from .config import find_tesseract, list_languages, tessdata_dir_for
-from .export_docx import export_docx
+from .config import find_tesseract, list_languages, resolve_tessdata
+from .export_docx import export_docx, write_text
 from .lang import LANG_MAP
-from .pipeline import Options, Pipeline
-from .preprocess import IMAGE_EXTS, PDF_EXTS
+from .pipeline import Cancelled, Options, Pipeline
+from .preprocess import IMAGE_EXTS, PDF_EXTS, InputError
+
+log = logging.getLogger("ocr_tool.cli")
+
+
+def describe_error(e: BaseException) -> str:
+    """Thông báo lỗi dễ hiểu cho người dùng (dùng chung cho dòng lệnh và giao diện)."""
+    if isinstance(e, InputError):
+        return str(e)
+    if isinstance(e, PermissionError):
+        return (f"Không ghi/đọc được file (đang mở trong Word hoặc thư mục không cho phép ghi): "
+                f"{getattr(e, 'filename', '') or e}")
+    if isinstance(e, MemoryError):
+        return "Không đủ bộ nhớ (RAM) để xử lý file này – thử đóng bớt chương trình hoặc giảm độ phân giải (--pdf-dpi 200)."
+    if isinstance(e, OSError) and getattr(e, "errno", None) == 28:
+        return "Ổ đĩa đã đầy, không ghi được kết quả."
+    try:
+        import pytesseract
+
+        if isinstance(e, pytesseract.TesseractNotFoundError):
+            return "Không chạy được Tesseract (chưa cài hoặc đường dẫn sai)."
+    except ImportError:  # pragma: no cover
+        pass
+    return f"{type(e).__name__}: {e}"
+
+
+def selftest_gui() -> int:
+    """Kiểm tra nhanh bản đóng gói: dựng được cửa sổ giao diện (Tcl/Tk đi kèm đủ) rồi đóng ngay."""
+    try:
+        from .gui import App
+
+        app = App()
+        app.update()
+        app.destroy()
+    except Exception as e:  # noqa: BLE001
+        print(f"Giao diện lỗi: {describe_error(e)}", file=sys.stderr)
+        return 1
+    print("GUI OK")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pdf-dpi", type=int, default=300, help="độ phân giải khi đọc PDF")
     ap.add_argument("--txt", action="store_true", help="xuất thêm file .txt thuần")
     ap.add_argument("--check", action="store_true", help="chỉ kiểm tra Tesseract và ngôn ngữ đã cài")
+    ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)  # kiểm tra bản đóng gói (CI)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--version", action="version", version=f"OCR2Word {__version__}")
     return ap
@@ -67,12 +106,12 @@ def expand_inputs(items: List[str]) -> List[Path]:
 
 def check_environment(tesseract: str | None, tessdata: str | None, langs: List[str]) -> tuple[str | None, list[str]]:
     cmd = tesseract or find_tesseract()
-    if not cmd:
+    if not cmd or not Path(cmd).is_file():
         return None, []
-    td = tessdata or (str(tessdata_dir_for(cmd)) if tessdata_dir_for(cmd) else None)
-    have = list_languages(cmd, td)
-    need = [LANG_MAP[l] for l in langs]
-    missing = [l for l in need if l not in have]
+    need = [LANG_MAP[code] for code in langs]
+    td = resolve_tessdata(cmd, tessdata, need)
+    have = list_languages(cmd, str(td) if td else None)
+    missing = [code for code in need if code not in have]
     return cmd, missing
 
 
@@ -90,6 +129,14 @@ def main(argv: List[str] | None = None) -> int:
     logging.getLogger("PIL").setLevel(logging.WARNING)
     logging.getLogger("pytesseract").setLevel(logging.INFO)
 
+    if args.selftest:
+        return selftest_gui()
+    if args.tesseract and not Path(args.tesseract).is_file():
+        print(f"Không thấy tesseract tại: {args.tesseract}", file=sys.stderr)
+        return 2
+    if args.tessdata and not Path(args.tessdata).is_dir():
+        print(f"Thư mục tessdata không tồn tại: {args.tessdata}", file=sys.stderr)
+        return 2
     cmd, missing = check_environment(args.tesseract, args.tessdata, args.lang)
     if not cmd:
         print("Không tìm thấy Tesseract. Cài Tesseract-OCR (xem README) hoặc dùng --tesseract <đường dẫn>.",
@@ -121,6 +168,9 @@ def main(argv: List[str] | None = None) -> int:
         detect_figures=not args.no_figures, spellfix=not args.no_spellfix, use_pdf_text=not args.no_pdf_text,
     )
     if args.dict:
+        if not Path(args.dict).is_file():
+            print(f"Không thấy file từ điển: {args.dict}", file=sys.stderr)
+            return 2
         from .spellfix import get_lexicon
         get_lexicon().load_user_dict(Path(args.dict))
     pipe = Pipeline(opts)
@@ -133,29 +183,47 @@ def main(argv: List[str] | None = None) -> int:
             single_out = op
         else:
             out_dir = op
-            out_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                print(f"Không tạo được thư mục kết quả {out_dir}: {e}", file=sys.stderr)
+                return 2
 
     all_pages = []
-    for f in files:
-        print(f"Đang xử lý: {f}")
-        pages = pipe.process_file(str(f))
-        if args.merge:
-            all_pages.extend(pages)
-            continue
-        target = single_out or (out_dir or f.parent) / (f.stem + ".docx")
-        export_docx(pages, str(target), font_name=args.font, keep_line_breaks=args.keep_line_breaks)
-        print(f"  -> {target}")
-        if args.txt:
-            txt = target.with_suffix(".txt")
-            txt.write_text("\n\n".join(p.text for p in pages), encoding="utf-8")
-            print(f"  -> {txt}")
-    if args.merge:
-        target = Path(args.merge)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        export_docx(all_pages, str(target), font_name=args.font, keep_line_breaks=args.keep_line_breaks)
-        print(f"  -> {target}")
-        if args.txt:
-            target.with_suffix(".txt").write_text("\n\n".join(p.text for p in all_pages), encoding="utf-8")
+    failed: List[Path] = []
+    try:
+        for f in files:
+            print(f"Đang xử lý: {f}")
+            try:
+                pages = pipe.process_file(str(f))
+                if args.merge:
+                    all_pages.extend(pages)
+                    continue
+                target = single_out or (out_dir or f.parent) / (f.stem + ".docx")
+                written = export_docx(pages, str(target), font_name=args.font,
+                                      keep_line_breaks=args.keep_line_breaks)
+                if Path(written) != target:
+                    print(f"  ! {target.name} đang mở/bị khoá – đã lưu thành {Path(written).name}")
+                print(f"  -> {written}")
+                if args.txt:
+                    print(f"  -> {write_text(pages, str(Path(written).with_suffix('.txt')))}")
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - một file lỗi không làm dừng các file còn lại
+                log.debug("lỗi xử lý %s", f, exc_info=True)
+                print(f"  ✖ Lỗi: {describe_error(e)}", file=sys.stderr)
+                failed.append(f)
+        if args.merge and all_pages:
+            written = export_docx(all_pages, args.merge, font_name=args.font, keep_line_breaks=args.keep_line_breaks)
+            print(f"  -> {written}")
+            if args.txt:
+                print(f"  -> {write_text(all_pages, str(Path(written).with_suffix('.txt')))}")
+    except (KeyboardInterrupt, Cancelled):
+        print("Đã dừng.", file=sys.stderr)
+        return 130
+    if failed:
+        print(f"Có {len(failed)}/{len(files)} file lỗi: " + ", ".join(p.name for p in failed), file=sys.stderr)
+        return 1
     return 0
 
 

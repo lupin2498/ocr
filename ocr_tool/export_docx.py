@@ -1,7 +1,9 @@
 """Xuất Page -> file Word (.docx) bằng python-docx."""
 from __future__ import annotations
 
-from typing import List, Optional
+import re
+from pathlib import Path
+from typing import List
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -21,9 +23,30 @@ _ALIGN = {
 }
 
 
+# Ký tự không được phép trong XML 1.0 (lớp chữ PDF hỏng hay chứa \x00, \x02, \x1f...) -> python-docx từ chối ghi
+_XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+_TXT_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
+
+
+def xml_safe(text: str) -> str:
+    return _XML_BAD.sub("", text) if text else text
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return lo
+    if v != v:  # NaN
+        return lo
+    return max(lo, min(hi, v))
+
+
 def _set_run_font(run, name: str, size_pt: float, bold: bool = False, italic: bool = False) -> None:
     run.font.name = name
-    run.font.size = Pt(size_pt)
+    run.font.size = Pt(_clamp(size_pt, 1.0, 400.0))
     run.font.bold = bold
     if italic:
         run.font.italic = True
@@ -72,6 +95,10 @@ class DocxExporter:
         self.page_break = page_break_between_pages
 
     def export(self, pages: List[Page], out_path: str) -> str:
+        self.build(pages).save(out_path)
+        return out_path
+
+    def build(self, pages: List[Page]):
         doc = Document()
         # font mặc định
         style = doc.styles["Normal"]
@@ -91,19 +118,31 @@ class DocxExporter:
             self._setup_section(section, page)
             self._write_header_footer(section, page)
             self._write_page(doc, page)
-        doc.save(out_path)
-        return out_path
+        return doc
 
     def _setup_section(self, section, page: Page) -> None:
-        section.orientation = WD_ORIENT.LANDSCAPE if page.landscape else WD_ORIENT.PORTRAIT
-        section.page_width = Inches(page.page_width_in)
-        section.page_height = Inches(page.page_height_in)
-        section.left_margin = Inches(page.margin_left_in)
-        section.right_margin = Inches(page.margin_right_in)
-        section.top_margin = Inches(page.margin_top_in)
-        section.bottom_margin = Inches(page.margin_bottom_in)
-        section.header_distance = Inches(max(0.2, min(0.5, page.margin_top_in - 0.35)))
-        section.footer_distance = Inches(max(0.2, min(0.5, page.margin_bottom_in - 0.35)))
+        pw = _clamp(page.page_width_in, 1.0, 22.0)  # Word: khổ giấy tối đa 22 inch
+        ph = _clamp(page.page_height_in, 1.0, 22.0)
+        section.orientation = WD_ORIENT.LANDSCAPE if pw > ph else WD_ORIENT.PORTRAIT
+        section.page_width = Inches(pw)
+        section.page_height = Inches(ph)
+
+        def fit(a: float, b: float, total: float):
+            a, b = _clamp(a, 0.0, total), _clamp(b, 0.0, total)
+            room = total - 0.5  # chừa ít nhất 0,5 inch cho nội dung
+            if a + b > room:
+                k = max(0.0, room) / (a + b)
+                a, b = a * k, b * k
+            return a, b
+
+        ml, mr = fit(page.margin_left_in, page.margin_right_in, pw)
+        mt, mb = fit(page.margin_top_in, page.margin_bottom_in, ph)
+        section.left_margin = Inches(ml)
+        section.right_margin = Inches(mr)
+        section.top_margin = Inches(mt)
+        section.bottom_margin = Inches(mb)
+        section.header_distance = Inches(max(0.2, min(0.5, mt - 0.35)))
+        section.footer_distance = Inches(max(0.2, min(0.5, mb - 0.35)))
 
     def _write_header_footer(self, section, page: Page) -> None:
         for part, text in ((section.header, page.header_text), (section.footer, page.footer_text)):
@@ -111,6 +150,7 @@ class DocxExporter:
             para = part.paragraphs[0] if part.paragraphs else part.add_paragraph()
             for r in list(para.runs):
                 r._element.getparent().remove(r._element)
+            text = xml_safe(text or "").strip()
             if text:
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 _set_run_font(para.add_run(text), self.font_name, 12)
@@ -135,14 +175,14 @@ class DocxExporter:
             pf.left_indent = Inches(min(p.left_indent_in, page.page_width_in / 2))
         if p.first_line_indent_in:
             pf.first_line_indent = Inches(max(-1.0, min(1.5, p.first_line_indent_in)))
-        pf.space_after = Pt(p.space_after_pt)
+        pf.space_after = Pt(_clamp(p.space_after_pt, 0.0, 300.0))
         pf.space_before = Pt(0)
         pf.widow_control = False  # không đẩy 2 dòng sang trang sau như bản gốc không có
-        if p.line_pitch_pt:
-            pf.line_spacing = Pt(p.line_pitch_pt)  # "Exactly" như bản gốc -> trang không bị tràn
+        if p.line_pitch_pt and p.line_pitch_pt > 0:
+            pf.line_spacing = Pt(_clamp(p.line_pitch_pt, 1.0, 600.0))  # "Exactly" như bản gốc -> trang không tràn
         else:
-            pf.line_spacing = p.line_spacing
-        lines = [ln.text for ln in p.lines if not ln.is_empty()]
+            pf.line_spacing = _clamp(p.line_spacing or 1.0, 0.5, 5.0)
+        lines = [xml_safe(ln.text) for ln in p.lines if not ln.is_empty()]
         # tab stop tại vị trí cột thứ hai (dòng "nhãn: <tab> giá trị" trong PDF)
         for ln in p.lines:
             for wd in ln.words:
@@ -195,7 +235,7 @@ class DocxExporter:
         para.alignment = _ALIGN.get(f.alignment, WD_ALIGN_PARAGRAPH.CENTER)
         pf = para.paragraph_format
         pf.space_before = Pt(0)
-        pf.space_after = Pt(f.space_after_pt)
+        pf.space_after = Pt(_clamp(f.space_after_pt, 0.0, 300.0))
         if f.left_indent_in:
             pf.left_indent = Inches(f.left_indent_in)
         para.add_run().add_picture(io.BytesIO(buf.tobytes()), width=Inches(width_in))
@@ -205,42 +245,45 @@ class DocxExporter:
             return
         table = doc.add_table(rows=t.n_rows, cols=t.n_cols)
         table.style = "Table Grid"
-        table.autofit = False
+        table.autofit = False  # python-docx ghi <w:tblLayout w:type="fixed"/> đúng vị trí
         table.alignment = WD_TABLE_ALIGNMENT.LEFT
-        # thụt bảng theo vị trí thật trên trang
+        tbl_pr = table._tbl.tblPr
+        # thụt bảng theo vị trí thật trên trang (w:tblInd phải đứng trước tblBorders/tblLayout/tblLook)
         indent_in = page.px_to_in(t.bbox[0]) - page.margin_left_in
         if indent_in > 0.05:
-            tbl_pr = table._tbl.tblPr
             ind = OxmlElement("w:tblInd")
-            ind.set(qn("w:w"), str(int(indent_in * 1440)))
+            ind.set(qn("w:w"), str(int(min(indent_in, 10.0) * 1440)))
             ind.set(qn("w:type"), "dxa")
-            tbl_pr.append(ind)
-        col_widths = [page.px_to_in(t.col_edges[c + 1] - t.col_edges[c]) for c in range(t.n_cols)]
+            tbl_pr.insert_element_before(ind, "w:tblBorders", "w:shd", "w:tblLayout", "w:tblCellMar",
+                                         "w:tblLook", "w:tblCaption", "w:tblDescription", "w:tblPrChange")
+        col_widths = [max(0.05, page.px_to_in(t.col_edges[c + 1] - t.col_edges[c])) for c in range(t.n_cols)]
         # lưới cột (w:tblGrid) – Word/LibreOffice dùng giá trị này để dàn cột
         grid = table._tbl.tblGrid
         for gc, w_in in zip(grid.findall(qn("w:gridCol")), col_widths):
             gc.set(qn("w:w"), str(int(w_in * 1440)))
-        tbl_pr = table._tbl.tblPr
-        layout = OxmlElement("w:tblLayout")
-        layout.set(qn("w:type"), "fixed")
-        tbl_pr.append(layout)
         for c, w_in in enumerate(col_widths):
             for r in range(t.n_rows):
                 table.cell(r, c).width = Inches(w_in)
         for r in range(t.n_rows):
             row_h = page.px_to_in(t.row_edges[r + 1] - t.row_edges[r])
-            table.rows[r].height = Inches(max(0.15, row_h))
+            table.rows[r].height = Inches(_clamp(row_h, 0.15, 20.0))
 
         for cell_info in t.cells:
             r, c = cell_info.row, cell_info.col
+            if not (0 <= r < t.n_rows and 0 <= c < t.n_cols):
+                continue  # ô nằm ngoài lưới (phát hiện bảng lỗi): bỏ qua thay vì làm hỏng cả file
             cell = table.cell(r, c)
             if cell_info.row_span > 1 or cell_info.col_span > 1:
-                other = table.cell(r + cell_info.row_span - 1, c + cell_info.col_span - 1)
-                cell = cell.merge(other)
+                r2 = min(t.n_rows, r + max(1, cell_info.row_span)) - 1
+                c2 = min(t.n_cols, c + max(1, cell_info.col_span)) - 1
+                try:
+                    cell = cell.merge(table.cell(r2, c2))
+                except Exception:  # noqa: BLE001 - ô gộp chồng lấn: giữ ô đơn
+                    pass
             para = cell.paragraphs[0]
             para.alignment = _ALIGN.get(cell_info.alignment, WD_ALIGN_PARAGRAPH.LEFT)
             para.paragraph_format.space_after = Pt(0)
-            lines = [ln for ln in cell_info.lines if ln.strip()]
+            lines = [xml_safe(ln) for ln in cell_info.lines if ln.strip()]
             for k, text in enumerate(lines):
                 run = para.add_run(text)
                 _set_run_font(run, self.font_name, t.font_size_pt, cell_info.bold)
@@ -248,10 +291,42 @@ class DocxExporter:
                     run.add_break(WD_BREAK.LINE)
         # khoảng cách sau bảng
         after = doc.add_paragraph()
-        after.paragraph_format.space_after = Pt(t.space_after_pt)
+        after.paragraph_format.space_after = Pt(_clamp(t.space_after_pt, 0.0, 300.0))
         _set_run_font(after.add_run(""), self.font_name, 2)
+
+
+def available_path(target: Path, attempt: int) -> Path:
+    return target if attempt == 0 else target.with_name(f"{target.stem} ({attempt}){target.suffix}")
 
 
 def export_docx(pages: List[Page], out_path: str, font_name: str = "Times New Roman",
                 keep_line_breaks: bool = False) -> str:
-    return DocxExporter(font_name=font_name, keep_line_breaks=keep_line_breaks).export(pages, out_path)
+    """Ghi file Word; nếu file đích đang mở trong Word (bị khoá) thì ghi sang "tên (1).docx", "tên (2).docx"...
+    Trả về đường dẫn thực sự đã ghi."""
+    doc = DocxExporter(font_name=font_name, keep_line_breaks=keep_line_breaks).build(pages)
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    last_err: Exception = PermissionError(str(target))
+    for attempt in range(20):
+        cand = available_path(target, attempt)
+        try:
+            doc.save(str(cand))
+            return str(cand)
+        except PermissionError as e:
+            last_err = e
+    raise last_err
+
+
+def write_text(pages: List[Page], out_path: str) -> str:
+    """Xuất .txt (UTF-8 có BOM để Notepad cũ nhận đúng tiếng Việt); file đang khoá thì đổi tên như .docx."""
+    target = Path(out_path)
+    text = _TXT_BAD.sub("", "\n\n".join(p.text for p in pages))
+    last_err: Exception = PermissionError(str(target))
+    for attempt in range(20):
+        cand = available_path(target, attempt)
+        try:
+            cand.write_text(text, encoding="utf-8-sig", errors="replace")
+            return str(cand)
+        except PermissionError as e:
+            last_err = e
+    raise last_err

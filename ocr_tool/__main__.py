@@ -3,11 +3,14 @@ import sys
 
 
 def main() -> int:
-    if len(sys.argv) > 1:
+    args = sys.argv[1:]
+    # OCR2Word.exe (không có cửa sổ console, sys.stdout = None) nhận file khi người dùng kéo-thả ảnh vào biểu
+    # tượng hoặc chọn "Open with": mở giao diện với các file đó thay vì chạy ngầm bản dòng lệnh không ai thấy
+    if args and sys.stdout is not None:
         from .cli import main as cli_main
         return cli_main()
     from .gui import run_gui
-    run_gui()
+    run_gui(args)
     return 0
 
 

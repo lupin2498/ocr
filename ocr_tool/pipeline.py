@@ -6,7 +6,8 @@ import logging
 import os
 import re
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from statistics import median
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -17,7 +18,7 @@ from .document import BBox, Element, Figure, Line, Page, Paragraph, Table, Table
 from .engine import Block, TesseractEngine
 from .lang import choose_lang
 from .layout import build_page
-from .preprocess import LoadedImage, count_pages, iter_inputs, load_inputs, preprocess
+from .preprocess import LoadedImage, count_pages, iter_inputs, preprocess
 from .figures import (CAPTION_RE, binarize_ink, crop_figure, detect_figures, detect_frames, detect_shaded_panels, merge_regions, table_is_figure,
                       text_quality)
 from .ocr_cleanup import clean_ocr_text
@@ -47,45 +48,84 @@ class Options:
     detect_figures: bool = True     # nhận diện hình vẽ/ảnh và giữ nguyên dạng ảnh
     workers: int = 0                # số tiến trình OCR song song cho PDF nhiều trang (0 = tự động)
     spellfix: bool = True           # sửa chính tả tiếng Việt sau OCR
+    auto_rotate: bool = True        # trang scan bị xoay 90/180/270 độ: tự xoay lại cho đúng chiều
     progress: Optional[Callable[[str], None]] = None
+    page_progress: Optional[Callable[[int, int], None]] = None  # (số trang xong, tổng số trang)
+    cancel: Optional[Callable[[], bool]] = None                 # trả True khi người dùng bấm Dừng
+
+
+class Cancelled(BaseException):
+    """Người dùng dừng xử lý giữa chừng (BaseException: các khối `except Exception` không nuốt mất)."""
 
 
 class Pipeline:
     def __init__(self, opts: Options):
         self.opts = opts
-        self.progress = opts.progress or (lambda m: None)
+        user_progress = opts.progress or (lambda m: None)
+
+        def progress(msg: str) -> None:
+            self._check_cancel()  # mỗi bước nhỏ (khối, bảng, trang) đều xem người dùng có bấm Dừng không
+            user_progress(msg)
+
+        self.progress = progress
         self.engine = TesseractEngine(
             langs=opts.langs, tesseract_cmd=opts.tesseract_cmd, tessdata_dir=opts.tessdata_dir,
             refine_blocks=opts.refine_blocks, refine_lines=opts.refine_lines,
             line_conf_threshold=opts.line_conf_threshold, progress=self.progress)
 
     # ------------------------------------------------------------------ vào/ra
+    def _check_cancel(self) -> None:
+        if self.opts.cancel is not None and self.opts.cancel():
+            raise Cancelled()
+
+    def _page_done(self, done: int, total: int) -> None:
+        if self.opts.page_progress is not None:
+            try:
+                self.opts.page_progress(done, total)
+            except Exception:  # noqa: BLE001 - lỗi giao diện không được làm hỏng OCR
+                log.debug("page_progress lỗi", exc_info=True)
+
     def process_file(self, path: str) -> List[Page]:
+        from .preprocess import is_pdf
+
+        self._check_cancel()
         n = count_pages(path)
         workers = self._n_workers(n)
         pages: List[Page] = []
-        if workers > 1 and path.lower().endswith(".pdf"):
+        if workers > 1 and is_pdf(Path(path)):
             pages = self._process_pdf_parallel(path, n, workers)
         else:
             for li in iter_inputs(path, pdf_dpi=self.opts.pdf_dpi, use_pdf_text=self.opts.use_pdf_text):
-                self.progress(f"Trang {li.page_index + 1}/{n} của {li.source}")
+                self._check_cancel()
+                self.progress(f"Trang {li.page_index + 1}/{n} của {Path(li.source).name}")
                 pages.append(self.process_image_safe(li))
                 del li
+                self._page_done(len(pages), n)
+        self._check_cancel()
         strip_running_headers(pages)
         self.fix_spelling(pages)
+        if pages and not any(p.text.strip() for p in pages) and \
+                not any(isinstance(e, Figure) for p in pages for e in p.elements):
+            self.progress(f"⚠ Không nhận ra chữ nào trong {Path(path).name} (trang trắng, ảnh quá mờ hoặc file hỏng)")
         return pages
 
     def process_image_safe(self, li: LoadedImage) -> Page:
         """Xử lý một trang; nếu lỗi bất ngờ thì giữ nguyên ảnh cả trang thay vì dừng cả tài liệu."""
         try:
             return self.process_image(li, fix_spelling=False)
+        except (Cancelled, KeyboardInterrupt):
+            raise
         except Exception as e:  # noqa: BLE001
             log.exception("trang %d lỗi, giữ nguyên ảnh trang", li.page_index + 1)
             self.progress(f"Trang {li.page_index + 1}: lỗi xử lý ({e}) – giữ nguyên ảnh trang")
-            img = li.image
-            h, w = img.shape[:2]
-            return build_page(w, h, li.dpi, [Figure(bbox=(0, 0, w, h), image=img.copy())],
-                              source=li.source, page_index=li.page_index)
+            return self._image_only_page(li)
+
+    @staticmethod
+    def _image_only_page(li: LoadedImage) -> Page:
+        img = li.image
+        h, w = img.shape[:2]
+        return build_page(w, h, li.dpi, [Figure(bbox=(0, 0, w, h), image=img.copy())],
+                          source=li.source, page_index=li.page_index)
 
     def _n_workers(self, n_pages: int) -> int:
         if n_pages < 3:
@@ -98,17 +138,51 @@ class Pipeline:
         import dataclasses
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        opts = dataclasses.replace(self.opts, progress=None, workers=1)
-        results: dict = {}
+        from concurrent.futures.process import BrokenProcessPool
+
+        # hàm gọi lại (lambda của giao diện) không gửi được sang tiến trình con
+        opts = dataclasses.replace(self.opts, progress=None, page_progress=None, cancel=None, workers=1)
+        results: Dict[int, Page] = {}
         self.progress(f"OCR song song {workers} tiến trình, {n} trang ...")
-        with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(opts,)) as ex:
+        ex = ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(opts,))
+        try:
             futs = {ex.submit(_worker_page, path, i): i for i in range(n)}
-            done = 0
             for fut in as_completed(futs):
                 i = futs[fut]
-                results[i] = fut.result()
-                done += 1
-                self.progress(f"Xong trang {done}/{n} (trang {i + 1})")
+                try:
+                    results[i] = fut.result()
+                except BrokenProcessPool:
+                    raise
+                except Exception as e:  # noqa: BLE001 - trang lỗi: làm lại tuần tự ở dưới
+                    log.warning("trang %d lỗi trong tiến trình con: %s", i + 1, e)
+                    continue
+                self.progress(f"Xong trang {len(results)}/{n} (trang {i + 1})")
+                self._page_done(len(results), n)
+                self._check_cancel()
+        except BrokenProcessPool as e:
+            # tiến trình con chết (thiếu bộ nhớ, bị diệt...): làm nốt các trang còn lại tuần tự
+            log.warning("OCR song song gián đoạn (%s) – xử lý tiếp tuần tự", e)
+            self.progress("OCR song song bị gián đoạn – xử lý tiếp từng trang ...")
+        except BaseException:
+            # Dừng / Ctrl+C: diệt ngay các tiến trình con thay vì chờ chúng làm xong trang đang dở
+            _kill_pool(ex)
+            raise
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
+        missing = [i for i in range(n) if i not in results]
+        if missing:
+            from .preprocess import render_pdf_page
+
+            for i in missing:
+                self._check_cancel()
+                try:
+                    li = render_pdf_page(path, i, self.opts.pdf_dpi, self.opts.use_pdf_text)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("trang %d: không đọc được (%s) – để trang trắng", i + 1, e)
+                    results[i] = build_page(2480, 3508, 300.0, [], source=path, page_index=i)
+                    continue
+                results[i] = self.process_image_safe(li)
+                self._page_done(len(results), n)
         return [results[i] for i in range(n)]
 
     def fix_spelling(self, pages: List[Page]) -> None:
@@ -163,7 +237,7 @@ class Pipeline:
         return self.process_image(LoadedImage(img, dpi, source, 0))
 
     # ------------------------------------------------------------------ một trang
-    def process_image(self, li: LoadedImage, fix_spelling: bool = True) -> Page:
+    def process_image(self, li: LoadedImage, fix_spelling: bool = True, _rotated: bool = False) -> Page:
         o = self.opts
         text_layer = self._usable_text_layer(li) if o.use_pdf_text else None
         if text_layer is not None:
@@ -182,7 +256,21 @@ class Pipeline:
             self.progress("Đọc lớp chữ có sẵn trong PDF (không cần OCR) ...")
             blocks = [Block(list(text_layer.paragraphs), lang="pdf")] if text_layer.paragraphs else []
         else:
-            blocks = self.engine.ocr_page(gray, psm=o.psm)
+            check_rotation = o.auto_rotate and not _rotated
+            # kiểm tra hướng trang ngay sau lượt đọc đầu: trang xoay mà nhận dạng lại từng khối/dòng chữ rác
+            # thì tốn gấp ~5 lần thời gian một trang thường
+            blocks = self.engine.ocr_page(gray, psm=o.psm, refine=not check_rotation)
+            if check_rotation:
+                if _looks_misoriented(blocks):
+                    k = self.engine.best_rotation(gray)
+                    if k:
+                        how = "lộn ngược" if k == 2 else "xoay ngang"
+                        self.progress(f"Trang {li.page_index + 1}: ảnh bị {how} – tự xoay lại cho đúng chiều")
+                        log.info("trang %d: xoay ảnh %d độ cho đúng chiều", li.page_index + 1, 90 * k)
+                        rot = np.ascontiguousarray(np.rot90(li.image, k))
+                        return self.process_image(LoadedImage(rot, li.dpi, li.source, li.page_index),
+                                                  fix_spelling=fix_spelling, _rotated=True)
+                blocks = self.engine.refine_page(gray, blocks)
         text_h = self._median_line_height(blocks, default=max(12.0, h / 90))
 
         tables: List[Table] = []
@@ -816,6 +904,29 @@ class Pipeline:
         return elements
 
 
+def _kill_pool(ex) -> None:
+    try:
+        procs = list(getattr(ex, "_processes", {}).values())
+    except Exception:  # noqa: BLE001
+        procs = []
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _looks_misoriented(blocks: List[Block]) -> bool:
+    """Trang ngược / nằm ngang: Tesseract vẫn "đọc" ra chữ nhưng độ tin cậy và tỉ lệ từ hợp lệ thấp
+    (trang thường: tin cậy ~90+, ~95% từ hợp lệ; trang xoay 90/180 độ: ~60, ~60%)."""
+    words = [w for b in blocks for p in b.paragraphs for ln in p.lines for w in ln.words if w.text.strip()]
+    if len(words) < 8:
+        return False
+    mean_conf = sum(max(0.0, w.conf) for w in words) / len(words)
+    q = text_quality(" ".join(w.text for w in words))
+    return mean_conf < 80 and q < 0.8
+
+
 _WORKER_PIPE: Optional["Pipeline"] = None
 
 
@@ -826,6 +937,7 @@ def _worker_init(opts: Options) -> None:
 
 def _worker_page(path: str, index: int) -> Page:
     from .preprocess import render_pdf_page
+    assert _WORKER_PIPE is not None
     li = render_pdf_page(path, index, _WORKER_PIPE.opts.pdf_dpi, _WORKER_PIPE.opts.use_pdf_text)
     return _WORKER_PIPE.process_image_safe(li)
 
@@ -880,8 +992,16 @@ def _extract_page_numbers(pages: List[Page]) -> Optional[int]:
             pg.header_text = str(n)
         elif zone == "bottom" and not pg.footer_text:
             pg.footer_text = str(n)
-        # bỏ số trang (và ký tự rác kèm theo như "|", "[") khỏi dòng; dòng chỉ còn rác/logo -> bỏ cả đoạn
-        ln.words = [w for w in ln.words if w is not wd and not re.fullmatch(r"[|\[\]Il!¦—–\-_.:;'`]+", w.text)]
+        # bỏ số trang và ký tự rác ngay sát nó ("| 101", "101 ]"); không đụng tới chữ khác của dòng
+        # (trước đây mọi từ dạng "I:" đều bị coi là rác -> "PHẦN I: ..." mất "I:")
+        k = next(j for j, w in enumerate(ln.words) if w is wd)
+        drop = {k}
+        for j in (k - 1, k + 1):
+            if 0 <= j < len(ln.words):
+                t = ln.words[j].text
+                if re.fullmatch(r"[|\[\]!¦—–\-_.:;'`]+", t) or (t in ("I", "l") and len(ln.words) <= 2):
+                    drop.add(j)
+        ln.words = [w for j, w in enumerate(ln.words) if j not in drop]
         rest = " ".join(w.text for w in ln.words)
         if sum(c.isalpha() for c in rest) < 8 or len(rest.split()) <= 2:
             pg.elements = [e for e in pg.elements if e is not el]

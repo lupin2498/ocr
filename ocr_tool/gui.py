@@ -7,16 +7,18 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional
 
 from . import __version__
-from .config import app_dir, find_tesseract, list_languages, tessdata_dir_for
-from .export_docx import export_docx
+from .cli import describe_error
+from .config import app_dir, find_tesseract, list_languages, resolve_tessdata
+from .export_docx import export_docx, write_text
 from .lang import LANG_MAP, LANG_NAMES
-from .pipeline import Options, Pipeline
+from .pipeline import Cancelled, Options, Pipeline
 from .preprocess import IMAGE_EXTS, PDF_EXTS
 
 FILETYPES = [
@@ -28,7 +30,7 @@ FILETYPES = [
 
 
 class App(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, files: Optional[List[str]] = None) -> None:
         super().__init__()
         self.title(f"OCR2Word {__version__} - Ảnh → Word (Việt / Anh / Nga)")
         self.geometry("860x640")
@@ -37,10 +39,18 @@ class App(tk.Tk):
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_outputs: List[str] = []
+        self._file_index = 0
         self._set_icon()
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll)
         self._detect_tesseract()
+        for f in files or []:
+            p = Path(f)
+            if p.is_dir():
+                self._add_dir(p)
+            elif p.is_file():
+                self._add_path(str(p))
 
     def _set_icon(self) -> None:
         base = Path(getattr(sys, "_MEIPASS", app_dir()))
@@ -146,7 +156,7 @@ class App(tk.Tk):
         ctl.pack(fill="x", padx=6, pady=4)
         self.start_btn = ttk.Button(ctl, text="▶  Bắt đầu chuyển đổi", command=self._start)
         self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(ctl, text="Dừng", command=self._stop.set, state="disabled")
+        self.stop_btn = ttk.Button(ctl, text="Dừng", command=self._request_stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
         self.open_btn = ttk.Button(ctl, text="Mở thư mục kết quả", command=self._open_output, state="disabled")
         self.open_btn.pack(side="left", padx=6)
@@ -156,6 +166,11 @@ class App(tk.Tk):
         self.log.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
     # ------------------------------------------------------------------ handlers
+    def _request_stop(self) -> None:
+        self._stop.set()
+        self.stop_btn.config(state="disabled")
+        self._log("Đang dừng ...")
+
     def _add_files(self) -> None:
         for f in filedialog.askopenfilenames(title="Chọn ảnh hoặc PDF", filetypes=FILETYPES):
             self._add_path(f)
@@ -163,9 +178,17 @@ class App(tk.Tk):
     def _add_folder(self) -> None:
         d = filedialog.askdirectory(title="Chọn thư mục chứa ảnh")
         if d:
-            for child in sorted(Path(d).iterdir()):
-                if child.suffix.lower() in IMAGE_EXTS | PDF_EXTS:
-                    self._add_path(str(child))
+            self._add_dir(Path(d))
+
+    def _add_dir(self, d: Path) -> None:
+        try:
+            children = sorted(d.iterdir())
+        except OSError as e:
+            messagebox.showerror("Lỗi", f"Không đọc được thư mục:\n{d}\n{e}")
+            return
+        for child in children:
+            if child.is_file() and child.suffix.lower() in IMAGE_EXTS | PDF_EXTS:
+                self._add_path(str(child))
 
     def _add_path(self, f: str) -> None:
         if f not in self.listbox.get(0, "end"):
@@ -193,7 +216,7 @@ class App(tk.Tk):
             self._log("⚠ Không tìm thấy Tesseract. Hãy cài Tesseract-OCR (xem README) hoặc chọn đường dẫn tesseract.exe.")
             return
         self.tess_var.set(cmd)
-        td = tessdata_dir_for(cmd)
+        td = resolve_tessdata(cmd, None, [LANG_MAP[c] for c in ("vi", "en", "ru")])
         langs = list_languages(cmd, str(td) if td else None)
         missing = [LANG_MAP[c] for c in ("vi", "en", "ru") if LANG_MAP[c] not in langs]
         self._log(f"Tesseract: {cmd}")
@@ -256,9 +279,16 @@ class App(tk.Tk):
             messagebox.showwarning("Thiếu ngôn ngữ", "Chọn ít nhất một ngôn ngữ.")
             return
         cmd = self.tess_var.get().strip() or find_tesseract()
-        if not cmd:
+        if not cmd or not Path(cmd).is_file():
             messagebox.showerror("Thiếu Tesseract", "Không tìm thấy Tesseract. Cài đặt rồi thử lại.")
             return
+        out_dir = self.out_var.get().strip() or None
+        if out_dir:
+            try:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                messagebox.showerror("Thư mục kết quả", f"Không tạo được thư mục kết quả:\n{out_dir}\n{e}")
+                return
         opts = Options(
             langs=langs, tesseract_cmd=cmd,
             deskew=self.deskew_var.get(), denoise=self.denoise_var.get(),
@@ -267,51 +297,61 @@ class App(tk.Tk):
             detect_figures=self.figures_var.get(), spellfix=self.spell_var.get(),
             use_pdf_text=self.pdftext_var.get(),
             progress=lambda m: self._queue.put(("log", "   " + m)),
+            page_progress=lambda done, total: self._queue.put(("page", (done, total))),
+            cancel=self._stop.is_set,
         )
-        out_dir = self.out_var.get().strip() or None
         self._stop.clear()
         self._last_outputs = []
+        self._file_index = 0
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.open_btn.config(state="disabled")
-        self.progress.config(maximum=len(files), value=0)
+        self.progress.config(maximum=len(files) * 100, value=0)
         self._worker = threading.Thread(
             target=self._work, args=(files, opts, out_dir, self.font_var.get(), self.keep_lines_var.get(),
                                      self.merge_var.get(), self.txt_var.get()), daemon=True)
         self._worker.start()
 
     def _work(self, files, opts, out_dir, font, keep_lines, merge, txt) -> None:
+        failed = []
         try:
             pipe = Pipeline(opts)
             all_pages = []
             for i, f in enumerate(files):
                 if self._stop.is_set():
-                    self._queue.put(("log", "Đã dừng theo yêu cầu."))
-                    break
+                    raise Cancelled()
+                self._queue.put(("file", i))
                 self._queue.put(("log", f"Đang xử lý: {f}"))
-                pages = pipe.process_file(f)
-                if merge:
-                    all_pages.extend(pages)
-                else:
-                    target = Path(out_dir) / (Path(f).stem + ".docx") if out_dir else Path(f).with_suffix(".docx")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    export_docx(pages, str(target), font_name=font, keep_line_breaks=keep_lines)
-                    if txt:
-                        target.with_suffix(".txt").write_text("\n\n".join(p.text for p in pages), encoding="utf-8")
-                    self._queue.put(("done_file", str(target)))
-                self._queue.put(("progress", i + 1))
+                try:
+                    pages = pipe.process_file(f)
+                    if merge:
+                        all_pages.extend(pages)
+                    else:
+                        target = Path(out_dir) / (Path(f).stem + ".docx") if out_dir else Path(f).with_suffix(".docx")
+                        written = export_docx(pages, str(target), font_name=font, keep_line_breaks=keep_lines)
+                        if Path(written) != target:
+                            self._queue.put(("log", f"   ! {target.name} đang mở/bị khoá – lưu thành {Path(written).name}"))
+                        if txt:
+                            write_text(pages, str(Path(written).with_suffix(".txt")))
+                        self._queue.put(("done_file", written))
+                except Exception as e:  # noqa: BLE001 - một file lỗi không làm dừng các file còn lại
+                    logging.exception("Lỗi xử lý %s", f)
+                    failed.append((Path(f).name, describe_error(e)))
+                    self._queue.put(("log", f"✖ Lỗi {Path(f).name}: {describe_error(e)}"))
+                self._queue.put(("progress", (i + 1) * 100))
             if merge and all_pages:
                 first = Path(files[0])
                 target = (Path(out_dir) if out_dir else first.parent) / (first.stem + "_merged.docx")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                export_docx(all_pages, str(target), font_name=font, keep_line_breaks=keep_lines)
+                written = export_docx(all_pages, str(target), font_name=font, keep_line_breaks=keep_lines)
                 if txt:
-                    target.with_suffix(".txt").write_text("\n\n".join(p.text for p in all_pages), encoding="utf-8")
-                self._queue.put(("done_file", str(target)))
-            self._queue.put(("finished", None))
+                    write_text(all_pages, str(Path(written).with_suffix(".txt")))
+                self._queue.put(("done_file", written))
+            self._queue.put(("finished", failed))
+        except Cancelled:
+            self._queue.put(("cancelled", None))
         except Exception as e:  # noqa: BLE001
             logging.exception("Lỗi xử lý")
-            self._queue.put(("error", str(e)))
+            self._queue.put(("error", describe_error(e)))
 
     def _poll(self) -> None:
         try:
@@ -319,13 +359,30 @@ class App(tk.Tk):
                 kind, payload = self._queue.get_nowait()
                 if kind == "log":
                     self._log(payload)
+                elif kind == "file":
+                    self._file_index = payload
+                    self.progress.config(value=payload * 100)
+                elif kind == "page":
+                    done, total = payload
+                    if total:
+                        self.progress.config(value=self._file_index * 100 + int(100 * done / total))
                 elif kind == "progress":
                     self.progress.config(value=payload)
                 elif kind == "done_file":
                     self._last_outputs.append(payload)
                     self._log(f"✔ Đã tạo: {payload}")
                 elif kind == "finished":
-                    self._log("Hoàn tất.")
+                    failed = payload or []
+                    if failed:
+                        self._log(f"Hoàn tất – {len(failed)} file lỗi.")
+                        messagebox.showwarning(
+                            "Có file lỗi",
+                            "Các file sau không chuyển được:\n\n" + "\n".join(f"• {n}: {m}" for n, m in failed[:10]))
+                    else:
+                        self._log("Hoàn tất.")
+                    self._reset_buttons()
+                elif kind == "cancelled":
+                    self._log("Đã dừng theo yêu cầu.")
                     self._reset_buttons()
                 elif kind == "error":
                     self._log(f"✖ Lỗi: {payload}")
@@ -340,6 +397,28 @@ class App(tk.Tk):
         self.stop_btn.config(state="disabled")
         self.open_btn.config(state="normal" if self._last_outputs else "disabled")
 
+    def _on_close(self) -> None:
+        """Đóng cửa sổ khi đang chạy: hỏi lại, dừng xử lý (kể cả các tiến trình OCR song song) rồi mới thoát,
+        tránh để chương trình chạy ngầm sau khi cửa sổ đã đóng."""
+        if self._worker is not None and self._worker.is_alive():
+            if not messagebox.askyesno("Đang chuyển đổi", "Đang chuyển đổi. Dừng lại và thoát?"):
+                return
+            self._stop.set()
+            self.start_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
+            self._log("Đang dừng ...")
+            deadline = time.time() + 30
+
+            def wait_worker() -> None:
+                if self._worker is not None and self._worker.is_alive() and time.time() < deadline:
+                    self.after(200, wait_worker)
+                else:
+                    self.destroy()
+
+            wait_worker()
+            return
+        self.destroy()
+
 
 def _log_file() -> Path:
     if os.name == "nt":
@@ -350,7 +429,7 @@ def _log_file() -> Path:
     return base / "ocr2word.log"
 
 
-def run_gui() -> None:
+def run_gui(files: Optional[List[str]] = None) -> None:
     handlers: list = []
     try:
         from logging.handlers import RotatingFileHandler
@@ -362,7 +441,7 @@ def run_gui() -> None:
     logging.basicConfig(level=logging.INFO, handlers=handlers,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("PIL").setLevel(logging.WARNING)
-    app = App()
+    app = App(files)
     app.mainloop()
 
 

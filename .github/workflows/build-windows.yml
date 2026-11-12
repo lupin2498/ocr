@@ -101,11 +101,39 @@ jobs:
 
       - name: Chạy thử bản đóng gói
         run: |
-          & dist\OCR2Word\ocr2word-cli.exe --check
+          $cli = "dist\OCR2Word\ocr2word-cli.exe"
+          function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what thất bại (mã $LASTEXITCODE)" } }
+          & $cli --version; Check "--version"
+          & $cli --check; Check "--check"
+          & $cli --selftest; Check "Giao diện (Tcl/Tk trong bản đóng gói)"
           python tests\make_sample.py build\sample.png
-          & dist\OCR2Word\ocr2word-cli.exe build\sample.png -o build\out --txt
+          & $cli build\sample.png -o build\out --txt; Check "Chuyển ảnh"
           Get-Content build\out\sample.txt -Encoding utf8 | Select-Object -First 3
           if (-not (Test-Path build\out\sample.docx)) { throw "Không tạo được file Word" }
+
+          # PDF scan 3 trang (không có lớp chữ): OCR song song nhiều tiến trình trong bản đóng gói,
+          # đường dẫn có dấu + dấu cách, TESSDATA_PREFIX cũ trỏ sai chỗ (máy từng cài Tesseract khác)
+          python -c "from PIL import Image; im = Image.open('build/sample.png').convert('RGB'); im.save('build/scan3.pdf', save_all=True, append_images=[im, im], resolution=300)"
+          $dir = Join-Path $env:RUNNER_TEMP "Thư mục thử nghiệm"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pdf = Join-Path $dir "Tài liệu quét 3 trang.pdf"
+          Copy-Item build\scan3.pdf $pdf
+          $env:TESSDATA_PREFIX = "C:\khong-co\tessdata"
+          & $cli $pdf -o (Join-Path $dir "Kết quả") --txt; Check "PDF scan nhiều trang"
+          Remove-Item Env:TESSDATA_PREFIX
+          $txt = Get-Content (Join-Path $dir "Kết quả\Tài liệu quét 3 trang.txt") -Raw -Encoding utf8
+          $n = ([regex]::Matches($txt, "English paragraph")).Count
+          if ($n -lt 3) { throw "PDF 3 trang chỉ đọc được $n trang" }
+
+          # bản đóng gói nằm trong thư mục có dấu (cài cho riêng người dùng có tên tiếng Việt), chỉ định --tessdata
+          $inst = Join-Path $env:TEMP "Nguyễn Văn A\OCR2Word"
+          New-Item -ItemType Directory -Force -Path $inst | Out-Null
+          Copy-Item -Recurse -Force dist\OCR2Word\* $inst
+          $cli2 = Join-Path $inst "ocr2word-cli.exe"
+          & $cli2 build\sample.png -o build\out3 --txt; Check "Chạy từ thư mục có dấu"
+          & $cli2 build\sample.png -o build\out4 --tessdata (Join-Path $inst "tesseract\tessdata"); Check "--tessdata có dấu"
+          foreach ($f in @("build\out3\sample.docx", "build\out4\sample.docx")) { if (-not (Test-Path $f)) { throw "Thiếu $f" } }
+          if (-not ((Get-Content build\out3\sample.txt -Raw -Encoding utf8) -match "tiếng Việt")) { throw "OCR sai khi chạy từ thư mục có dấu" }
 
       - name: Tạo bản portable (.zip)
         run: |
@@ -117,7 +145,23 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
           & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" installer\OCR2Word.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup lỗi" }
           Get-ChildItem dist\installer
+
+      - name: Cài thử bộ cài (im lặng), chạy bản đã cài rồi gỡ
+        run: |
+          $setup = Get-ChildItem dist\installer\*-Setup-win64.exe | Select-Object -First 1
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\OCR2Word thử"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=""$dir""" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Bộ cài lỗi (mã $($p.ExitCode))" }
+          $cli = Join-Path $dir "ocr2word-cli.exe"
+          if (-not (Test-Path (Join-Path $dir "OCR2Word.exe"))) { throw "Bộ cài thiếu OCR2Word.exe" }
+          & $cli --check
+          if ($LASTEXITCODE -ne 0) { throw "Bản đã cài không chạy được" }
+          & $cli build\sample.png -o build\out_installed
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path build\out_installed\sample.docx)) { throw "Bản đã cài không chuyển được ảnh" }
+          $u = Start-Process -FilePath (Join-Path $dir "unins000.exe") -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait -PassThru
+          Write-Host "Gỡ cài đặt: mã $($u.ExitCode)"
 
       # Bản phát hành đã chứa file cài đặt; artifact chỉ cho lần push thường, giữ 2 ngày
       # (mỗi bản ~380 MB, giữ lâu sẽ hết hạn mức lưu trữ và làm hỏng cả bước phát hành)

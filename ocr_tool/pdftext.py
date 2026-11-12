@@ -91,6 +91,8 @@ def extract_page(page, scale: float) -> PdfPageText:
                         continue
                     if vn or fallback:
                         ch = decode_tcvn3(ch, upper)
+                    if ch < " " or "\x7f" <= ch <= "\x9f":
+                        continue  # ký tự điều khiển (glyph không có mã Unicode -> \x00...): bỏ, không ghi ra .txt/.docx
                     cur_txt.append(ch)
                     cur_box.append(tuple(c["bbox"]))
                 if s.strip():

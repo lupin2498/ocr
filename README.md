@@ -52,9 +52,12 @@ chọn **More info → Run anyway**.
 ### Giao diện đồ hoạ
 Chạy **`run_gui.bat`** (hoặc `python -m ocr_tool`):
 
-1. Thêm file ảnh / PDF (hoặc cả thư mục).
+1. Thêm file ảnh / PDF (hoặc cả thư mục). Có thể kéo-thả file vào biểu tượng `OCR2Word.exe`.
 2. Chọn ngôn ngữ có trong tài liệu (mặc định bật cả Việt – Anh – Nga), font Word, thư mục kết quả.
 3. Nhấn **Bắt đầu chuyển đổi**. Mỗi file tạo ra một `.docx` cùng tên (hoặc gộp thành một file).
+   Thanh tiến độ chạy theo từng trang; nút **Dừng** dừng ngay cả khi đang OCR song song.
+   File lỗi (hỏng, PDF có mật khẩu...) được bỏ qua, các file còn lại vẫn chạy, cuối cùng báo danh sách file lỗi.
+   Nếu file `.docx` cùng tên đang mở trong Word, kết quả được lưu thành `tên (1).docx`.
 
 ### Dòng lệnh
 ```bat
@@ -194,7 +197,8 @@ ocr_tool/
   pipeline.py     nối các bước, tách chữ trong bảng khỏi văn bản, thứ tự đọc
   export_docx.py  xuất Word
   cli.py / gui.py giao diện dòng lệnh / đồ hoạ (Tkinter)
-tests/            kiểm thử đầu-cuối với ảnh mẫu 3 ngôn ngữ + bảng
+tests/            kiểm thử đầu-cuối với ảnh mẫu 3 ngôn ngữ + bảng; test_robustness.py: đầu vào hỏng,
+                  file Word đúng chuẩn, file đang mở trong Word, dừng giữa chừng, trang xoay, OCR song song
 ```
 
 Chạy kiểm thử: `pip install -r requirements-dev.txt && python -m pytest tests`.
@@ -205,3 +209,16 @@ Chạy kiểm thử: `pip install -r requirements-dev.txt && python -m pytest te
 * Chỉ bật các ngôn ngữ thực sự có trong tài liệu.
 * Ảnh chụp bằng điện thoại bị nhiễu: bật **Khử nhiễu** (`--denoise`); nền không đều: `--binarize`.
 * Bảng không có đường kẻ sẽ được xuất dưới dạng văn bản (phát hiện bảng dựa trên đường kẻ).
+* Trang scan bị xoay ngang / lộn ngược được tự xoay lại cho đúng chiều.
+
+## 10. Có gì mới ở 1.5.1 (kiểm thử toàn diện và sửa lỗi)
+
+* Không còn lỗi khi PDF chứa ký tự điều khiển; file Word đúng chuẩn OOXML (bảng không còn bị Word báo hỏng).
+* Báo lỗi dễ hiểu cho file rỗng / hỏng / không phải ảnh, PDF có mật khẩu, PDF 0 trang; ảnh tải dở vẫn đọc phần còn lại;
+  ảnh 16 bit, ảnh trong suốt, CMYK, ảnh rất lớn (thu nhỏ trước khi OCR, tránh hết RAM), trang PDF khổ cực lớn.
+* Một file lỗi không làm dừng cả lô (giao diện và dòng lệnh); dòng lệnh trả mã 1 nếu có file lỗi, 2 nếu sai cấu hình.
+* Tự xoay trang scan bị xoay 90° / 180°; giữ đúng tiêu đề chạy dạng "PHẦN I: ..." khi tách số trang.
+* Tesseract: không còn hỏng khi đường dẫn có dấu cách hoặc có dấu tiếng Việt (tên người dùng Windows có dấu),
+  ưu tiên dữ liệu ngôn ngữ đi kèm chương trình hơn biến `TESSDATA_PREFIX` cũ của máy.
+* OCR song song: tiến trình con chết thì làm tiếp tuần tự thay vì mất trang; đóng cửa sổ khi đang chạy thì dừng gọn.
+* Bộ cài: cài đè bản cũ xoá sạch thư viện cũ; `build_exe.bat` đặt đúng số phiên bản cho bộ cài.

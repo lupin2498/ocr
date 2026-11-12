@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unicodedata
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Tuple
 
 # Bảng nguyên âm mang thanh: base -> (ngang, huyền, sắc, hỏi, ngã, nặng)
 _TONE_TABLE = {

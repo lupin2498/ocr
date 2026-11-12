@@ -6,12 +6,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import logging
+
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 PDF_EXTS = {".pdf"}
+# Ảnh scan khổ lớn (A3 600 dpi ~ 70 MP) vượt ngưỡng chống "bom giải nén" mặc định của Pillow (89 MP cảnh báo)
+Image.MAX_IMAGE_PIXELS = 400_000_000
+MAX_WORK_PIXELS = 60_000_000  # ảnh lớn hơn được thu nhỏ trước khi OCR (đủ cho A3 ở 400 dpi), tránh hết bộ nhớ
+
+log = logging.getLogger(__name__)
+
+
+class InputError(Exception):
+    """File đầu vào không đọc được – thông báo đã viết sẵn cho người dùng."""
 
 
 @dataclass
@@ -23,108 +34,187 @@ class LoadedImage:
     pdf_text: Optional[object] = None  # pdftext.PdfPageText nếu PDF có lớp chữ
 
 
+def _check_file(p: Path) -> None:
+    if not p.is_file():
+        raise InputError(f"Không tìm thấy file: {p}")
+    if p.stat().st_size == 0:
+        raise InputError(f"File rỗng (0 byte): {p.name}")
+
+
+def is_pdf(p: Path) -> bool:
+    """Nhận PDF theo nội dung (đầu file %PDF) chứ không chỉ theo đuôi."""
+    try:
+        with open(p, "rb") as f:
+            head = f.read(1024)
+    except OSError:
+        return p.suffix.lower() in PDF_EXTS
+    return b"%PDF" in head
+
+
+def _open_image(p: Path) -> Image.Image:
+    _check_file(p)
+    try:
+        im = Image.open(p)
+        im.load()
+        return im
+    except UnidentifiedImageError:
+        raise InputError(f"Không đọc được ảnh (file hỏng hoặc không phải ảnh/PDF): {p.name}") from None
+    except Image.DecompressionBombError:
+        raise InputError(f"Ảnh quá lớn (trên {Image.MAX_IMAGE_PIXELS // 1_000_000} triệu điểm ảnh): {p.name}") from None
+    except (OSError, SyntaxError, ValueError) as e:
+        # file bị cắt cụt (tải dở, chép lỗi): vẫn cố đọc phần còn lại thay vì bỏ cả trang
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        try:
+            im = Image.open(p)
+            im.load()
+            log.warning("%s bị hỏng/cắt cụt (%s) – chỉ đọc được một phần ảnh", p.name, e)
+            return im
+        except Exception:  # noqa: BLE001
+            raise InputError(f"Ảnh bị hỏng, không đọc được: {p.name} ({e})") from None
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+
 def load_inputs(path: str, pdf_dpi: int = 300, use_pdf_text: bool = True) -> List[LoadedImage]:
     """Đọc ảnh hoặc PDF (mỗi trang PDF -> 1 ảnh). Dùng PIL để hỗ trợ đường dẫn Unicode."""
-    p = Path(path)
-    ext = p.suffix.lower()
-    if ext in PDF_EXTS:
-        return _load_pdf(p, pdf_dpi, use_pdf_text)
-    if ext == ".tif" or ext == ".tiff" or ext == ".gif":
-        return _load_multiframe(p)
-    with Image.open(p) as im:
-        im = ImageOps.exif_transpose(im)
-        dpi = _pil_dpi(im)
-        arr = _pil_to_bgr(im)
-    return [LoadedImage(arr, dpi, str(p), 0)]
+    return list(iter_inputs(path, pdf_dpi, use_pdf_text))
 
 
-def _load_multiframe(p: Path) -> List[LoadedImage]:
-    out: List[LoadedImage] = []
-    with Image.open(p) as im:
-        n = getattr(im, "n_frames", 1)
+def _iter_image_frames(p: Path):
+    im = _open_image(p)
+    try:
+        n = getattr(im, "n_frames", 1) if p.suffix.lower() in (".tif", ".tiff", ".gif") else 1
         for i in range(n):
-            im.seek(i)
-            frame = ImageOps.exif_transpose(im.copy())
-            out.append(LoadedImage(_pil_to_bgr(frame), _pil_dpi(frame), str(p), i))
-    return out
+            if n > 1:
+                im.seek(i)
+                frame = im.copy()
+            else:
+                frame = im
+            frame = ImageOps.exif_transpose(frame)
+            dpi = _pil_dpi(frame)
+            arr, dpi = _pil_to_bgr(frame, dpi)
+            yield LoadedImage(arr, dpi, str(p), i)
+    finally:
+        im.close()
 
 
-def _load_pdf(p: Path, dpi: int, use_pdf_text: bool = True) -> List[LoadedImage]:
-    return list(iter_pdf(p, dpi, use_pdf_text))
+def _fitz():
+    try:
+        import pymupdf as fitz  # type: ignore
+    except ImportError:  # pragma: no cover
+        import fitz  # type: ignore
+    try:
+        fitz.TOOLS.mupdf_display_errors(False)  # lỗi PDF hỏng đã báo bằng thông báo dễ hiểu bên dưới
+    except Exception:  # noqa: BLE001
+        pass
+    return fitz
+
+
+_REPAIRED_WARNED: set = set()
+
+
+def open_pdf(p: Path):
+    """Mở PDF; lỗi thường gặp -> InputError có thông báo dễ hiểu."""
+    fitz = _fitz()
+    _check_file(p)
+    try:
+        doc = fitz.open(str(p))
+    except Exception as e:  # noqa: BLE001 - EmptyFileError, FileDataError, RuntimeError tuỳ phiên bản
+        raise InputError(f"Không mở được PDF (file hỏng hoặc không đúng định dạng): {p.name} ({e})") from None
+    if doc.needs_pass and not doc.authenticate(""):
+        doc.close()
+        raise InputError(f"PDF có mật khẩu, không đọc được: {p.name}. Hãy mở bằng trình đọc PDF, "
+                         f"in/lưu thành bản không mật khẩu rồi thử lại.")
+    if doc.page_count == 0:
+        doc.close()
+        raise InputError(f"PDF không có trang nào (có thể đã hỏng): {p.name}")
+    if getattr(doc, "is_repaired", False) and str(p) not in _REPAIRED_WARNED:
+        _REPAIRED_WARNED.add(str(p))
+        log.warning("%s bị hỏng (tải dở / chép lỗi) – đã cố sửa, nội dung có thể bị thiếu", p.name)
+    return doc
 
 
 def iter_pdf(p: Path, dpi: int, use_pdf_text: bool = True):
     """Đọc PDF lần lượt từng trang (không giữ ảnh cả cuốn trong bộ nhớ – sách 230 trang ~6 GB)."""
+    doc = open_pdf(p)
     try:
-        import pymupdf as fitz  # type: ignore
-    except ImportError:  # pragma: no cover
-        import fitz  # type: ignore
-    doc = fitz.open(str(p))
-    zoom = dpi / 72.0
-    try:
-        for i, page in enumerate(doc):
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-            if pix.n == 3:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            elif pix.n == 4:
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            li = LoadedImage(np.ascontiguousarray(arr), float(dpi), str(p), i)
-            del pix
-            if use_pdf_text:
-                try:
-                    from .pdftext import extract_page
-                    li.pdf_text = extract_page(page, zoom)
-                except Exception:  # noqa: BLE001 - lớp chữ hỏng thì OCR như bình thường
-                    li.pdf_text = None
-            yield li
+        for i in range(doc.page_count):
+            yield _render_page(doc, i, dpi, use_pdf_text, str(p))
     finally:
         doc.close()
 
 
-def render_pdf_page(path: str, index: int, dpi: int = 300, use_pdf_text: bool = True) -> LoadedImage:
-    """Dựng một trang PDF (dùng cho OCR song song)."""
+def _page_dpi(page, dpi: int) -> float:
+    """Trang PDF khổ rất lớn (A0, bản vẽ) dựng ở dpi thấp hơn để ảnh không vượt MAX_WORK_PIXELS."""
+    w_in, h_in = page.rect.width / 72.0, page.rect.height / 72.0
+    px = w_in * h_in * dpi * dpi
+    if px > MAX_WORK_PIXELS and w_in > 0 and h_in > 0:
+        return max(72.0, float(dpi) * (MAX_WORK_PIXELS / px) ** 0.5)
+    return float(dpi)
+
+
+def _render_page(doc, index: int, dpi: int, use_pdf_text: bool, source: str) -> LoadedImage:
+    fitz = _fitz()
+    page = doc[index]
+    d = _page_dpi(page, dpi)
+    zoom = d / 72.0
     try:
-        import pymupdf as fitz  # type: ignore
-    except ImportError:  # pragma: no cover
-        import fitz  # type: ignore
-    with fitz.open(path) as doc:
-        page = doc[index]
-        zoom = dpi / 72.0
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if pix.n == 3 else cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR) \
-            if pix.n == 4 else arr
-        li = LoadedImage(np.ascontiguousarray(arr), float(dpi), path, index)
-        if use_pdf_text:
-            try:
-                from .pdftext import extract_page
-                li.pdf_text = extract_page(page, zoom)
-            except Exception:  # noqa: BLE001
-                li.pdf_text = None
-        return li
+        if pix.n == 3:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        elif pix.n == 4:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        arr = np.ascontiguousarray(arr)
+        del pix
+    except Exception as e:  # noqa: BLE001 - trang hỏng: trang trắng thay vì bỏ cả tài liệu
+        log.warning("%s trang %d: không dựng được ảnh trang (%s) – để trang trắng", source, index + 1, e)
+        w = max(1, int(page.rect.width * zoom)) if page.rect.width else int(8.27 * d)
+        h = max(1, int(page.rect.height * zoom)) if page.rect.height else int(11.69 * d)
+        arr = np.full((h, w, 3), 255, np.uint8)
+    li = LoadedImage(arr, d, source, index)
+    if use_pdf_text:
+        try:
+            from .pdftext import extract_page
+            li.pdf_text = extract_page(page, zoom)
+        except Exception:  # noqa: BLE001 - lớp chữ hỏng thì OCR như bình thường
+            li.pdf_text = None
+    return li
+
+
+def render_pdf_page(path: str, index: int, dpi: int = 300, use_pdf_text: bool = True) -> LoadedImage:
+    """Dựng một trang PDF (dùng cho OCR song song)."""
+    doc = open_pdf(Path(path))
+    try:
+        return _render_page(doc, index, dpi, use_pdf_text, path)
+    finally:
+        doc.close()
 
 
 def iter_inputs(path: str, pdf_dpi: int = 300, use_pdf_text: bool = True):
     p = Path(path)
-    if p.suffix.lower() in PDF_EXTS:
+    _check_file(p)
+    if p.suffix.lower() in PDF_EXTS or is_pdf(p):
         yield from iter_pdf(p, pdf_dpi, use_pdf_text)
     else:
-        yield from load_inputs(path, pdf_dpi, use_pdf_text)
+        yield from _iter_image_frames(p)
 
 
 def count_pages(path: str) -> int:
     p = Path(path)
-    if p.suffix.lower() in PDF_EXTS:
+    _check_file(p)
+    if p.suffix.lower() in PDF_EXTS or is_pdf(p):
+        doc = open_pdf(p)
         try:
-            import pymupdf as fitz  # type: ignore
-        except ImportError:  # pragma: no cover
-            import fitz  # type: ignore
-        with fitz.open(str(p)) as d:
-            return d.page_count
+            return doc.page_count
+        finally:
+            doc.close()
     if p.suffix.lower() in (".tif", ".tiff", ".gif"):
-        with Image.open(p) as im:
+        im = _open_image(p)
+        try:
             return getattr(im, "n_frames", 1)
+        finally:
+            im.close()
     return 1
 
 
@@ -140,14 +230,28 @@ def _pil_dpi(im: Image.Image) -> Optional[float]:
     return None
 
 
-def _pil_to_bgr(im: Image.Image) -> np.ndarray:
-    if im.mode in ("RGBA", "LA", "P"):
+def _pil_to_bgr(im: Image.Image, dpi: Optional[float] = None) -> Tuple[np.ndarray, Optional[float]]:
+    """Ảnh PIL (mọi chế độ màu) -> mảng BGR 8 bit; ảnh quá lớn được thu nhỏ (dpi điều chỉnh theo)."""
+    w, h = im.size
+    if w * h > MAX_WORK_PIXELS:
+        f = math.ceil(math.sqrt(w * h / MAX_WORK_PIXELS))
+        log.info("ảnh %dx%d quá lớn – thu nhỏ %d lần trước khi OCR", w, h, f)
+        im = im.reduce(f) if hasattr(im, "reduce") else im.resize((w // f, h // f))
+        dpi = dpi / f if dpi else None
+    if im.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):
+        # ảnh 16/32 bit (máy scan chế độ "48-bit"): co giãn về 8 bit theo dải giá trị thật
+        a = np.asarray(im, dtype=np.float32)
+        lo, hi = float(np.percentile(a, 0.5)), float(np.percentile(a, 99.5))
+        a = np.clip((a - lo) * (255.0 / max(1e-6, hi - lo)), 0, 255).astype(np.uint8)
+        return cv2.cvtColor(a, cv2.COLOR_GRAY2BGR), dpi
+    if im.mode in ("RGBA", "LA", "P", "PA", "RGBa", "La") or (im.mode == "L" and "transparency" in im.info):
+        rgba = im.convert("RGBA")
         bg = Image.new("RGB", im.size, (255, 255, 255))
-        bg.paste(im.convert("RGBA"), mask=im.convert("RGBA").split()[-1])
+        bg.paste(rgba, mask=rgba.split()[-1])
         im = bg
     elif im.mode != "RGB":
         im = im.convert("RGB")
-    return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
+    return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR), dpi
 
 
 def to_gray(img: np.ndarray) -> np.ndarray:

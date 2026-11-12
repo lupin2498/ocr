@@ -25,7 +25,9 @@ def choose_paper(width_px: int, height_px: int, dpi: Optional[float]) -> Tuple[f
     if dpi:
         w_in, h_in = width_px / dpi, height_px / dpi
         if 3.5 <= min(w_in, h_in) <= 20 and 4 <= max(w_in, h_in) <= 30:
-            return (w_in, h_in)
+            # Word chỉ cho khổ giấy tối đa 22 inch: trang lớn hơn (A2, bản vẽ) thu nhỏ tỉ lệ
+            k = min(1.0, 22.0 / max(w_in, h_in))
+            return (w_in * k, h_in * k)
     paper = A4
     return (paper[1], paper[0]) if landscape else paper
 

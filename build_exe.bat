@@ -15,7 +15,7 @@ if not defined SRC if exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" set "SR
 if not defined SRC if exist "%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe" set "SRC=%LOCALAPPDATA%\Programs\Tesseract-OCR"
 if defined SRC (
     xcopy /E /I /Y /Q "%SRC%" "dist\OCR2Word\tesseract" >nul
-    echo     Da chep Tesseract tu: %SRC%
+    echo     Da chep Tesseract tu: "%SRC%"
 ) else (
     echo     [!] Khong tim thay Tesseract-OCR - ban dong goi se can may dich tu cai Tesseract.
 )
@@ -24,11 +24,16 @@ echo.
 echo Ket qua: dist\OCR2Word\OCR2Word.exe  (giao dien)  va  dist\OCR2Word\ocr2word-cli.exe  (dong lenh)
 echo.
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+rem Doc phien ban TRUOC khoi if: bien %%VER%% trong khoi duoc thay the ngay luc doc ca khoi (se rong).
+rem Dau ngoac dong trong lenh echo ben trong khoi phai viet ^) neu khong se dong khoi som.
+set "VER="
+for /f "delims=" %%v in ('python -c "import ocr_tool; print(ocr_tool.__version__)"') do set "VER=%%v"
+if not defined VER set "VER=0.0.0"
 if exist "%ISCC%" (
-    echo Tao bo cai bang Inno Setup...
-    for /f "delims=" %%v in ('python -c "import ocr_tool; print(ocr_tool.__version__)"') do set "VER=%%v"
+    echo Tao bo cai bang Inno Setup (phien ban %VER%^)...
     "%ISCC%" /DMyAppVersion=%VER% installer\OCR2Word.iss && echo Bo cai: dist\installer\
 ) else (
-    echo De tao bo cai .exe, cai Inno Setup 6 (https://jrsoftware.org/isdl.php) roi chay lai file nay.
+    echo De tao bo cai .exe, cai Inno Setup 6 (https://jrsoftware.org/isdl.php^) roi chay lai file nay.
 )
 pause

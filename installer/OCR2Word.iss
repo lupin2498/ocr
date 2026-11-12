@@ -37,6 +37,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+; Cài đè bản cũ: xoá thư viện của bản trước (tránh lẫn file .pyd/.dll cũ - mới trong _internal)
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "..\dist\OCR2Word\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

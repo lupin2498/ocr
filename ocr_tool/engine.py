@@ -6,7 +6,7 @@ import logging
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -65,10 +65,14 @@ class TesseractEngine:
                  refine_blocks: bool = True, refine_lines: bool = True,
                  line_conf_threshold: float = 70.0,
                  progress: Optional[Callable[[str], None]] = None):
-        if tesseract_cmd:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        self.tessdata_dir = tessdata_dir
+        from .config import configure_tesseract, find_tesseract
+
         self.langs = to_tesseract_langs(langs) or ["eng"]
+        cmd = tesseract_cmd or find_tesseract()
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
+        # thư mục dữ liệu ngôn ngữ đặt qua biến môi trường TESSDATA_PREFIX (an toàn với dấu cách / chữ có dấu)
+        self.tessdata_dir = configure_tesseract(cmd, tessdata_dir, self.langs)
         self.oem = oem
         self.refine_blocks = refine_blocks
         self.refine_lines = refine_lines
@@ -82,10 +86,7 @@ class TesseractEngine:
         return "+".join(self.langs)
 
     def _config(self, psm: int) -> str:
-        cfg = f"--oem {self.oem} --psm {psm} -c preserve_interword_spaces=1"
-        if self.tessdata_dir:
-            cfg += f' --tessdata-dir "{self.tessdata_dir}"'
-        return cfg
+        return f"--oem {self.oem} --psm {psm} -c preserve_interword_spaces=1"
 
     def image_to_words(self, img: np.ndarray, lang: str, psm: int) -> List[Tuple[Tuple[int, int, int], Word]]:
         """Trả về [(khoá (block, par, line), Word)] theo thứ tự đọc của Tesseract."""
@@ -114,6 +115,36 @@ class TesseractEngine:
             key = (int(data["block_num"][i]), int(data["par_num"][i]), int(data["line_num"][i]))
             out.append((key, w))
         return out
+
+    def best_rotation(self, gray: np.ndarray) -> int:
+        """Số lần xoay 90° (theo np.rot90, ngược chiều kim đồng hồ) để chữ đứng đúng chiều: 0..3.
+        Thử OCR ảnh thu nhỏ ở 4 hướng, chấm điểm theo các từ nằm ngang đọc được và hợp lệ."""
+        from .figures import text_quality
+
+        h, w = gray.shape[:2]
+        s = min(1.0, 1600.0 / max(1, max(h, w)))
+        small = cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1.0 else gray
+
+        def score(img: np.ndarray) -> float:
+            total = 0.0
+            for _, wd in self.image_to_words(np.ascontiguousarray(img), self.combined_lang, psm=3):
+                t = wd.text.strip(".,;:!?()[]\"'“”")
+                if len(t) < 3 or wd.conf < 60 or wd.width < wd.height:
+                    continue  # bỏ từ ngắn, từ kém tin cậy và chữ nằm dọc (Tesseract tự xoay khối chữ dọc)
+                if text_quality(t, wd.conf) >= 1.0:
+                    total += wd.conf * len(t)
+            return total
+
+        base = score(small)
+        best_k, best = 0, base
+        for k in (2, 1, 3):
+            sc = score(np.rot90(small, k))
+            if sc > best:
+                best_k, best = k, sc
+        log.debug("best_rotation: base %.0f, k=%d %.0f", base, best_k, best)
+        if best_k and best > 1.5 * base and best > 2000:
+            return best_k
+        return 0
 
     @staticmethod
     def group_words(items: List[Tuple[Tuple[int, int, int], Word]]) -> List[Block]:
@@ -169,7 +200,9 @@ class TesseractEngine:
         return best
 
     # ------------------------------------------------------------------ toàn trang
-    def ocr_page(self, gray: np.ndarray, psm: int = 3) -> List[Block]:
+    def ocr_page(self, gray: np.ndarray, psm: int = 3, refine: bool = True) -> List[Block]:
+        """OCR cả trang. refine=False: chỉ lượt đọc đầu (nhanh) – để kiểm tra trang có bị xoay không trước khi
+        tốn thời gian nhận dạng lại từng khối/dòng (gọi refine_page sau)."""
         self.progress(f"OCR toàn trang ({self.combined_lang}) ...")
         items = self.image_to_words(gray, self.combined_lang, psm)
         blocks = self.group_words(items)
@@ -180,6 +213,9 @@ class TesseractEngine:
         page_profile = script_profile("\n".join(b.text for b in blocks))
         self.page_vietnamese = "vie" in self.langs and \
             page_profile["viet"] >= 0.04 * max(1, page_profile["lat"])
+        return self.refine_page(gray, blocks) if refine else blocks
+
+    def refine_page(self, gray: np.ndarray, blocks: List[Block]) -> List[Block]:
         if self.refine_blocks and len(self.langs) > 1:
             blocks = self._refine_blocks(gray, blocks)
         if self.refine_lines:
