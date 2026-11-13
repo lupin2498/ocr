@@ -64,7 +64,8 @@ class TesseractEngine:
                  tessdata_dir: Optional[str] = None, oem: int = 1,
                  refine_blocks: bool = True, refine_lines: bool = True,
                  line_conf_threshold: float = 70.0,
-                 progress: Optional[Callable[[str], None]] = None):
+                 progress: Optional[Callable[[str], None]] = None,
+                 cancel: Optional[Callable[[], None]] = None):
         from .config import configure_tesseract, find_tesseract
 
         self.langs = to_tesseract_langs(langs) or ["eng"]
@@ -78,6 +79,7 @@ class TesseractEngine:
         self.refine_lines = refine_lines
         self.line_conf_threshold = line_conf_threshold
         self.progress = progress or (lambda msg: None)
+        self.cancel = cancel or (lambda: None)  # ném Cancelled khi người dùng bấm Dừng
         self.page_vietnamese = False  # được cập nhật sau mỗi lần ocr_page
 
     # ------------------------------------------------------------------ cơ bản
@@ -92,6 +94,9 @@ class TesseractEngine:
         """Trả về [(khoá (block, par, line), Word)] theo thứ tự đọc của Tesseract."""
         if img is None or img.size == 0 or min(img.shape[:2]) < 6:
             return []
+        # Dừng: không khởi động thêm lệnh tesseract nào. Tiến trình OCR song song bị diệt đúng lúc đang khởi động
+        # tesseract.exe thì tesseract mồ côi chạy tiếp và ghi file .tsv vào thư mục tạm sau khi đã dọn (Windows)
+        self.cancel()
         try:
             data = pytesseract.image_to_data(img, lang=lang, config=self._config(psm), output_type=Output.DICT)
         except (pytesseract.TesseractError, RuntimeError, OSError) as e:

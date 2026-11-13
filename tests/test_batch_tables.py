@@ -308,7 +308,9 @@ def test_parallel_cancel_is_prompt_and_leaves_no_temp_files(tmp_path, monkeypatc
     t0 = time.time()
     with pytest.raises(Cancelled):
         Pipeline(Options(tesseract_cmd=TESS, workers=3, cancel=lambda: time.time() - t0 > 3)).process_file(str(pdf))
-    assert time.time() - t0 < 10  # trước đây: chờ tiến trình con OCR xong cả trang
+    t_stop = time.time()
+    assert t_stop - t0 < 10  # trước đây: chờ tiến trình con OCR xong cả trang
     time.sleep(1)
     left = [p for p in tmp.rglob("*") if p.is_file()]
-    assert left == [], left
+    # ghi sau khi đã dừng (> 0) = tesseract mồ côi còn chạy sau khi tiến trình con bị diệt
+    assert left == [], [(p.name, round(p.stat().st_mtime - t_stop, 2)) for p in left]

@@ -71,7 +71,7 @@ class Pipeline:
         self.engine = TesseractEngine(
             langs=opts.langs, tesseract_cmd=opts.tesseract_cmd, tessdata_dir=opts.tessdata_dir,
             refine_blocks=opts.refine_blocks, refine_lines=opts.refine_lines,
-            line_conf_threshold=opts.line_conf_threshold, progress=self.progress)
+            line_conf_threshold=opts.line_conf_threshold, progress=self.progress, cancel=self._check_cancel)
 
     # ------------------------------------------------------------------ vào/ra
     def _check_cancel(self) -> None:
