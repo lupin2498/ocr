@@ -194,15 +194,23 @@ def test_table_on_small_image_is_not_turned_into_picture(tmp_path):
 
 
 @needs_tesseract
-def test_numeric_cells_not_replaced_by_ruling_junk(tmp_path):
+def test_numeric_cells_not_replaced_by_ruling_junk(tmp_path, caplog):
     """Ô chỉ có số: OCR cả trang đọc dính đường kẻ ra "PE—— :", "СОНИ" và rác này từng thay chữ đọc lại đúng;
     mô hình tiếng Việt đọc "8" thành "ö"."""
     n = 12
     rows = [[str(r + 1), f"Bu lông M{10 + r}", str(5 * r + 3), "Đạt"] for r in range(n)]
     img = _table_image(tmp_path / "so.png", rows, [150, 450, 1300, 1800, 2330], top=250, row_h=64,
                        size=(2480, 250 + 64 * n + 200), title=False)
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="ocr_tool")
     page = Pipeline(Options(tesseract_cmd=TESS)).process_file(str(img))[0]
-    t = [e for e in page.elements if isinstance(e, Table)][0]
+    tables = [e for e in page.elements if isinstance(e, Table)]
+    # kết quả OCR khác nhau theo bản dữ liệu ngôn ngữ (máy CI dùng tessdata_best): in đủ để chẩn đoán
+    assert tables, "không nhận ra bảng: %s\n%s" % (
+        [(type(e).__name__, getattr(e, "bbox", None)) for e in page.elements],
+        "\n".join(r.getMessage() for r in caplog.records)[-4000:])
+    t = tables[0]
     got = {(c.row, c.col): " ".join(c.lines).strip() for c in t.cells}
     numeric = [(got.get((r, c), "").strip(".,:;'|"), rows[r][c]) for r in range(n) for c in (0, 2)]
     assert all(g.isdigit() for g, _ in numeric), numeric
@@ -211,6 +219,30 @@ def test_numeric_cells_not_replaced_by_ruling_junk(tmp_path):
 
     # cột chữ không lẫn rác đường kẻ (dấu thanh có thể sai do OCR, không kiểm tra ở đây)
     assert all(re.fullmatch(r"Bu l\w{1,3}ng M\d\d", got.get((r, 1), "")) for r in range(n)), got
+
+
+@needs_tesseract
+def test_table_kept_when_page_ocr_returns_tall_confident_junk(tmp_path, monkeypatch):
+    """Bộ cài Windows dùng tessdata_best: OCR cả trang trên ảnh chỉ có bảng trả về vài "dòng" cao hàng trăm px mà
+    độ tin cậy vẫn cao -> chiều cao chữ ước lượng sai, ngưỡng dò bảng sai và mất cả bảng. Chiều cao chữ phải được
+    đối chiếu với cỡ vết mực khi trang có ít dòng tin cậy."""
+    n = 12
+    rows = [[str(r + 1), f"Bu lông M{10 + r}", str(5 * r + 3), "Đạt"] for r in range(n)]
+    img = _table_image(tmp_path / "so.png", rows, [150, 450, 1300, 1800, 2330], top=250, row_h=64,
+                       size=(2480, 250 + 64 * n + 200), title=False)
+
+    def tall_lines(self, gray, psm=3, refine=True):
+        def line(y):
+            return Line([Word("Bu", 300, y, 120, 320, 90), Word("lông", 450, y, 200, 320, 90),
+                         Word("M10", 680, y, 160, 320, 90)])
+        return [Block([Paragraph(lines=[line(y)])], lang="vie") for y in (100, 600, 1100)]
+
+    monkeypatch.setattr(TesseractEngine, "ocr_page", tall_lines)
+    monkeypatch.setattr(TesseractEngine, "refine_page", lambda self, gray, blocks: blocks)
+    page = Pipeline(Options(tesseract_cmd=TESS, spellfix=False)).process_file(str(img))[0]
+    tables = [e for e in page.elements if isinstance(e, Table)]
+    assert tables and (tables[0].n_rows, tables[0].n_cols) == (n, 4), \
+        [(type(e).__name__, getattr(e, "bbox", None)) for e in page.elements]
 
 
 # ------------------------------------------------------------------ bố cục hai cột

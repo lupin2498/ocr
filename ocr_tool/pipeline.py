@@ -296,13 +296,21 @@ class Pipeline:
                                                   fix_spelling=fix_spelling, _rotated=True)
                 blocks = self.engine.refine_page(gray, blocks)
         text_h = self._median_line_height(blocks, default=0.0)
-        if not text_h or not self._median_line_height(blocks, default=0.0, good_only=True):
-            # không có dòng nào đọc tin cậy (ảnh chỉ có một bảng kẻ dày: Tesseract trả về vài "dòng" rác cao cả
-            # trăm px) -> ước lượng cỡ chữ từ vết mực, nếu không ngưỡng dò bảng sai và cả bảng thành hình
+        n_good = self._count_good_lines(blocks)
+        ink_h = None
+        if n_good < 8:
+            # ít dòng đọc tin cậy (ảnh gần như chỉ có một bảng kẻ dày / hình): Tesseract hay trả về vài "dòng" rác
+            # cao cả trăm px, tuỳ phiên bản dữ liệu ngôn ngữ (tessdata_best còn coi vài dòng rác là "tin cậy").
+            # Lấy chiều cao các dòng tin cậy, đối chiếu với cỡ vết mực; nếu không ngưỡng dò bảng sai -> mất bảng
+            # hoặc cả bảng thành hình
+            cand = self._median_line_height(blocks, default=0.0, good_only=True) or text_h
             ink_h = _ink_text_height(gray)
-            if ink_h and (not text_h or text_h > 2.5 * ink_h):
-                text_h = ink_h
+            if ink_h and (not cand or cand > 2.5 * ink_h):
+                cand = ink_h
+            text_h = cand
         text_h = text_h or max(12.0, h / 90)
+        log.debug("chiều cao dòng chữ %.1f px (%d dòng tin cậy, vết mực %s)", text_h, n_good,
+                  f"{ink_h:.1f}" if ink_h else "-")
 
         tables: List[Table] = []
         grids: List[TableGrid] = []
@@ -356,10 +364,18 @@ class Pipeline:
         return page
 
     @staticmethod
-    def _median_line_height(blocks: List[Block], default: float, good_only: bool = False) -> float:
+    def _good_lines(blocks: List[Block]) -> list:
         lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
-        if good_only:
-            lines = [ln for ln in lines if ln.conf >= 50 and text_quality(ln.text, ln.conf) >= 0.5]
+        return [ln for ln in lines if ln.conf >= 50 and text_quality(ln.text, ln.conf) >= 0.5]
+
+    @classmethod
+    def _count_good_lines(cls, blocks: List[Block]) -> int:
+        return len(cls._good_lines(blocks))
+
+    @classmethod
+    def _median_line_height(cls, blocks: List[Block], default: float, good_only: bool = False) -> float:
+        lines = cls._good_lines(blocks) if good_only else \
+            [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
         hs = [ln.height for ln in lines]
         return float(median(hs)) if hs else default
 
