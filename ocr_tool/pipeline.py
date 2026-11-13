@@ -874,12 +874,22 @@ class Pipeline:
                     cell_text = _script_evidence(cell_words)  # rác đường kẻ ("СОНИ", "т") không quyết định ngôn ngữ
                     cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else short_lang
                     lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
+                    has_letters = any(ch.isalpha() for ch in " ".join(lines))
                     if len(cell_text) < 3 and set(cell_lang.split("+")) < set(self.engine.langs) and \
-                            any(ch.isalpha() for ch in " ".join(lines)):
+                            (has_letters or (lines and _mean_conf(re_words) < 80)):
                         # ô có chữ mà đọc cả trang không ra (ảnh chỉ có bảng): đọc thêm bằng các mô hình người dùng
-                        # chọn, giữ bản có dấu tiếng Việt / chữ Nga ("Dat" -> "Đạt", "Ha" -> "Да")
+                        # chọn, giữ bản có dấu tiếng Việt / chữ Nga ("Dat" -> "Đạt", "Ha" -> "Да").
+                        # Ô số đọc kém tin cậy: mô hình tiếng Anh đọc sai thì độ tin cậy thấp ("53" -> "03" (31),
+                        # bản tessdata_best: "8" -> "3") trong khi mô hình kết hợp đọc đúng -> giữ bản tin cậy hơn
                         alt_lines, alt_words = self._ocr_cell(gray, gc.bbox, self.engine.combined_lang)
-                        if _prefer_reading(lines, re_words, alt_lines, alt_words):
+                        if has_letters:
+                            if _prefer_reading(lines, re_words, alt_lines, alt_words):
+                                lines, re_words = alt_lines, alt_words
+                        elif alt_lines and _is_numeric(alt_lines) and _mean_conf(alt_words) > _mean_conf(re_words) \
+                                and _digits(alt_lines) != _digits(lines) \
+                                and " ".join(w.text for w in cell_words).strip() != " ".join(lines).strip():
+                            # chỉ thay khi chữ số thật sự khác: mô hình kết hợp hay thêm dấu chấm thừa ("45" -> "4.5")
+                            # với độ tin cậy cao; bản khớp với chữ đọc cả trang được giữ
                             lines, re_words = alt_lines, alt_words
                     if re_words:
                         align_words = re_words
@@ -1008,6 +1018,15 @@ def _prefer_reading(cur_lines: List[str], cur_words: Sequence[Word], alt_lines: 
     sa, sb = pa["viet"] + pa["cyr"], pb["viet"] + pb["cyr"]
     ca, cb = _mean_conf(cur_words), _mean_conf(alt_words)
     return (sb > sa and cb >= ca - 10) or (sb == sa and cb > ca + 5)
+
+
+def _digits(lines: List[str]) -> str:
+    return "".join(ch for ch in " ".join(lines) if ch.isdigit())
+
+
+def _is_numeric(lines: List[str]) -> bool:
+    t = " ".join(lines).strip()
+    return bool(t) and bool(re.fullmatch(r"[\d\s.,:;/%+\-–()]+", t)) and any(ch.isdigit() for ch in t)
 
 
 def _mean_conf(words: Sequence[Word]) -> float:
