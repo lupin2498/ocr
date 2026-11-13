@@ -211,7 +211,19 @@ Chạy kiểm thử: `pip install -r requirements-dev.txt && python -m pytest te
 * Bảng không có đường kẻ sẽ được xuất dưới dạng văn bản (phát hiện bảng dựa trên đường kẻ).
 * Trang scan bị xoay ngang / lộn ngược được tự xoay lại cho đúng chiều.
 
-## 10. Có gì mới ở 1.5.1 (kiểm thử toàn diện và sửa lỗi)
+## 10. Có gì mới ở 1.5.2 (đợt kiểm thử thứ hai)
+
+* Hai file trùng tên (`a\scan.png` + `b\scan.png`, hoặc `scan.png` + `scan.pdf`) không còn ghi đè nhau: file sau lưu thành `scan (2).docx`.
+* `--merge tong_hop` tự thêm đuôi `.docx`; `--merge THƯ_MỤC` lưu file gộp vào thư mục đó; `-o x.docx` với nhiều file đầu vào báo lỗi rõ ràng.
+* Thư mục kết quả không ghi được: báo ngay khi bấm chạy (không phải đợi OCR xong cả lô).
+* Từ điển người dùng: chỉ thay cả từ ("ng => người" không còn biến "những" thành "nhữngười");
+  đọc được file lưu bằng Notepad dạng "Unicode" hoặc ANSI; sửa từ điển có hiệu lực ngay, không phải mở lại chương trình.
+* Bảng: không còn bị biến thành hình khi ảnh nhỏ (ảnh cắt riêng bảng, ảnh chụp màn hình); đọc ô số chính xác hơn
+  (không còn "8" → "Bo"/"ö", "13" → "TM"); bảng dài 100+ hàng được giữ là bảng.
+* Trang 2 cột: dòng cuối đoạn ở cột trái không còn bị tách thành đoạn riêng.
+* Bấm Dừng khi đang OCR song song: dừng trong 1–2 giây và không để lại file tạm.
+
+## 11. Có gì mới ở 1.5.1 (kiểm thử toàn diện và sửa lỗi)
 
 * Không còn lỗi khi PDF chứa ký tự điều khiển; file Word đúng chuẩn OOXML (bảng không còn bị Word báo hỏng).
 * Báo lỗi dễ hiểu cho file rỗng / hỏng / không phải ảnh, PDF có mật khẩu, PDF 0 trang; ảnh tải dở vẫn đọc phần còn lại;
