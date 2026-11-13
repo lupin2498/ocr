@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -856,12 +856,10 @@ class Pipeline:
         tables: List[Table] = []
         for gi, g in enumerate(grids):
             words = table_words[gi]
-            table_lang = choose_lang(" ".join(w.text for w in words), self.engine.langs) if words \
-                else self.engine.combined_lang
             # ô ngắn / ô cả trang không đọc ra chữ (số thứ tự, số lượng...): mô hình tiếng Việt đọc "8" thành "ö",
             # "13" thành "15". Bảng không có tiếng Nga dùng mô hình tiếng Anh (đọc số chính xác nhất); chữ có dấu
-            # vẫn được ocr_region_best đọc lại bằng mô hình tiếng Việt.
-            short_lang = "eng" if "eng" in self.engine.langs and "rus" not in table_lang.split("+") else table_lang
+            # vẫn được đọc lại bằng các mô hình người dùng chọn.
+            short_lang = _table_languages(words, self.engine.langs, self.engine.combined_lang)[1]
             tbl = Table(bbox=g.bbox, row_edges=list(g.row_edges), col_edges=list(g.col_edges),
                         from_text_layer=from_text_layer)
             self.progress(f"Đọc bảng {gi + 1}/{len(grids)} ({g.n_rows}x{g.n_cols}) ...")
@@ -873,7 +871,7 @@ class Pipeline:
                 align_words = cell_words
                 re_words: List[Word] = []
                 if self.opts.reocr_cells and not from_text_layer:
-                    cell_text = " ".join(w.text for w in cell_words)
+                    cell_text = _script_evidence(cell_words)  # rác đường kẻ ("СОНИ", "т") không quyết định ngôn ngữ
                     cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else short_lang
                     lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
                     if len(cell_text) < 3 and set(cell_lang.split("+")) < set(self.engine.langs) and \
@@ -984,6 +982,22 @@ def _ink_text_height(gray: np.ndarray) -> Optional[float]:
     if ok.sum() < 10:
         return None
     return float(np.median(hh[ok])) * 1.3
+
+
+def _script_evidence(words: Sequence[Word], min_conf: float = 70.0) -> str:
+    """Chữ đủ tin cậy để đoán ngôn ngữ: từ có ít nhất 2 chữ cái, đọc với độ tin cậy cao. Đọc dính đường kẻ bảng
+    hay ra ký tự Cyrillic lẻ ("Е im i т Е" với tessdata_best) – nếu dùng để chọn mô hình thì cả cột "Bu lông"
+    bị đọc bằng mô hình tiếng Nga thành "Ви 16ng"."""
+    return " ".join(w.text for w in words if w.conf >= min_conf and sum(ch.isalpha() for ch in w.text) >= 2)
+
+
+def _table_languages(words: Sequence[Word], langs: Sequence[str], combined: str) -> Tuple[str, str]:
+    """(ngôn ngữ của bảng, ngôn ngữ đọc ô ngắn / ô không có chữ đọc tin cậy)."""
+    evidence = _script_evidence(words)
+    table_lang = choose_lang(evidence, list(langs)) if evidence else combined
+    has_rus = bool(evidence) and "rus" in table_lang.split("+")
+    short_lang = "eng" if "eng" in langs and not has_rus else table_lang
+    return table_lang, short_lang
 
 
 def _prefer_reading(cur_lines: List[str], cur_words: Sequence[Word], alt_lines: List[str],

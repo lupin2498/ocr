@@ -250,6 +250,21 @@ def test_table_kept_when_page_ocr_returns_tall_confident_junk(tmp_path, monkeypa
         [(type(e).__name__, getattr(e, "bbox", None)) for e in page.elements]
 
 
+def test_table_language_ignores_cyrillic_ruling_junk():
+    """Máy Windows (tessdata_best) đọc đường kẻ bảng thành "Е im i т Е": trước đây bảng bị coi là có tiếng Nga,
+    ô "Bu lông M10" đọc bằng mô hình tiếng Nga ra "Ви 16ng M10". Chữ Nga đọc tin cậy thì vẫn nhận ra."""
+    from ocr_tool.pipeline import _table_languages
+
+    langs, combined = ["vie", "eng", "rus"], "vie+eng+rus"
+    junk = [Word(t, 100 * k, 50, 30, 40, 62.4) for k, t in enumerate("Е im i т Е".split())]
+    assert _table_languages(junk, langs, combined)[1] == "eng"
+    assert _table_languages([], langs, combined)[1] == "eng"
+    russian = [Word(t, 100 * k, 50, 80, 40, 91) for k, t in enumerate("Гайка Проверено".split())]
+    assert "rus" in _table_languages(russian, langs, combined)[1]
+    viet = [Word(t, 100 * k, 50, 80, 40, 93) for k, t in enumerate("Bu lông Đạt yêu cầu".split())]
+    assert _table_languages(viet, langs, combined) == ("vie", "eng")
+
+
 # ------------------------------------------------------------------ bố cục hai cột
 def _line(text, x, y, h=38, gap=12, ch=20):
     words, cx = [], x
