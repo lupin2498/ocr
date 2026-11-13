@@ -874,6 +874,14 @@ class Pipeline:
                     cell_text = _script_evidence(cell_words)  # rác đường kẻ ("СОНИ", "т") không quyết định ngôn ngữ
                     cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else short_lang
                     lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
+                    page_text = " ".join(w.text for w in cell_words).strip()
+                    if _is_numeric(lines) and page_text != " ".join(lines).strip():
+                        # chữ số chưa được lượt đọc cả trang xác nhận: phóng 2x một ô chữ vốn đã lớn làm tessdata_best
+                        # (bộ cài Windows) đọc "8" thành "3", "53" thành "03" mà độ tin cậy vẫn cao; ở kích thước gốc
+                        # mọi mô hình đều đọc đúng -> đọc thêm một lần không phóng, giữ bản tin cậy hơn
+                        l1, w1 = self._ocr_cell(gray, gc.bbox, cell_lang, scale=1)
+                        if l1 and _is_numeric(l1) and _mean_conf(w1) > _mean_conf(re_words):
+                            lines, re_words = l1, w1
                     has_letters = any(ch.isalpha() for ch in " ".join(lines))
                     if len(cell_text) < 3 and set(cell_lang.split("+")) < set(self.engine.langs) and \
                             (has_letters or (lines and _mean_conf(re_words) < 80)):
@@ -886,8 +894,7 @@ class Pipeline:
                             if _prefer_reading(lines, re_words, alt_lines, alt_words):
                                 lines, re_words = alt_lines, alt_words
                         elif alt_lines and _is_numeric(alt_lines) and _mean_conf(alt_words) > _mean_conf(re_words) \
-                                and _digits(alt_lines) != _digits(lines) \
-                                and " ".join(w.text for w in cell_words).strip() != " ".join(lines).strip():
+                                and _digits(alt_lines) != _digits(lines) and page_text != " ".join(lines).strip():
                             # chỉ thay khi chữ số thật sự khác: mô hình kết hợp hay thêm dấu chấm thừa ("45" -> "4.5")
                             # với độ tin cậy cao; bản khớp với chữ đọc cả trang được giữ
                             lines, re_words = alt_lines, alt_words
@@ -909,8 +916,9 @@ class Pipeline:
             tables.append(tbl)
         return blocks, tables
 
-    def _ocr_cell(self, gray: np.ndarray, bbox, lang: str):
-        """OCR lại một ô bảng -> (các dòng chữ, các từ với toạ độ tuyệt đối trên trang)."""
+    def _ocr_cell(self, gray: np.ndarray, bbox, lang: str, scale: Optional[int] = None):
+        """OCR lại một ô bảng -> (các dòng chữ, các từ với toạ độ tuyệt đối trên trang).
+        `scale`: None = tự chọn (ô thấp phóng 2x cho dấu tiếng Việt rõ hơn), 1 = giữ kích thước gốc."""
         l, t, r, b = bbox
         inset = max(3, int((b - t) * 0.06))
         l, t, r, b = l + inset, t + inset, r - inset, b - inset
@@ -921,7 +929,8 @@ class Pipeline:
         if (crop < 128).mean() < 0.002:
             return [], []
         # chữ nhỏ: phóng to 2x để Tesseract nhận dấu tiếng Việt / chữ Cyrillic tốt hơn
-        scale = 2 if crop.shape[0] < 120 else 1
+        if scale is None:
+            scale = 2 if crop.shape[0] < 120 else 1
         if scale > 1:
             crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         # thêm viền trắng giúp Tesseract nhận dạng tốt hơn
