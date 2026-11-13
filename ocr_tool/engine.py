@@ -274,8 +274,9 @@ class TesseractEngine:
             prev = out[-1]
             prev_par = prev.paragraphs[-1]
             body_left = min(ln.bbox[0] for ln in prev_par.lines)
+            ref_right = TesseractEngine._column_right(prev, blocks, content_right)
             if TesseractEngine._is_continuation(prev_par.lines[-1], nxt.paragraphs[0].lines[0],
-                                                body_left, content_right, lh):
+                                                body_left, ref_right, lh):
                 prev_par.lines.extend(nxt.paragraphs[0].lines)
                 prev.paragraphs.extend(nxt.paragraphs[1:])
                 new_bbox = prev.bbox
@@ -284,6 +285,18 @@ class TesseractEngine:
             else:
                 out.append(nxt)
         return out
+
+    @staticmethod
+    def _column_right(prev: Block, blocks: List[Block], page_right: int) -> int:
+        """Mép phải của cột chứa khối `prev`. Trang nhiều cột: nếu lấy mép phải của cả trang thì dòng cuối
+        cột trái (Tesseract hay tách thành khối riêng) không bao giờ được nối lại -> đoạn văn bị cắt đôi."""
+        pl, pt, pr, pb = prev.bbox
+        beside = [b.bbox[0] for b in blocks if b is not prev and b.bbox[0] >= pr and b.bbox[1] < pb and b.bbox[3] > pt]
+        if not beside:
+            return page_right
+        limit = min(beside)
+        same_col = [b.bbox[2] for b in blocks if b.bbox[2] <= limit and b.bbox[0] < pr and b.bbox[2] > pl]
+        return max(same_col) if same_col else pr
 
     # ------------------------------------------------------------------ tinh chỉnh theo khối
     def _crop(self, gray: np.ndarray, bbox, pad: int):

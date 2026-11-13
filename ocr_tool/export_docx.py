@@ -1,9 +1,11 @@
 """Xuất Page -> file Word (.docx) bằng python-docx."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Set
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -297,6 +299,37 @@ class DocxExporter:
 
 def available_path(target: Path, attempt: int) -> Path:
     return target if attempt == 0 else target.with_name(f"{target.stem} ({attempt}){target.suffix}")
+
+
+def _path_key(p) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
+def unique_output(target: Path, used: Set[str]) -> Path:
+    """Tên file kết quả chưa dùng trong lượt chạy này: hai đầu vào trùng tên (a\\scan.png + b\\scan.png với
+    cùng thư mục kết quả, hoặc scan.png + scan.pdf) không được ghi đè lên nhau -> scan.docx, scan (2).docx..."""
+    cand, n = target, 1
+    while _path_key(cand) in used:
+        n += 1
+        cand = target.with_name(f"{target.stem} ({n}){target.suffix}")
+    used.add(_path_key(cand))
+    return cand
+
+
+def remember_output(path, used: Set[str]) -> None:
+    used.add(_path_key(path))
+
+
+def check_writable_dir(d: Path) -> Optional[str]:
+    """None nếu tạo/ghi được file trong thư mục `d`; nếu không: thông báo lỗi dễ hiểu (kiểm tra trước khi OCR,
+    tránh OCR xong cả lô mới biết không lưu được kết quả)."""
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=str(d), prefix=".ocr2word_", suffix=".tmp"):
+            pass
+    except OSError as e:
+        return f"Không ghi được vào thư mục {d} ({e.strerror or e}). Hãy chọn thư mục kết quả khác."
+    return None
 
 
 def export_docx(pages: List[Page], out_path: str, font_name: str = "Times New Roman",

@@ -9,7 +9,7 @@ from typing import List
 
 from . import __version__
 from .config import find_tesseract, list_languages, resolve_tessdata
-from .export_docx import export_docx, write_text
+from .export_docx import check_writable_dir, export_docx, remember_output, unique_output, write_text
 from .lang import LANG_MAP
 from .pipeline import Cancelled, Options, Pipeline
 from .preprocess import IMAGE_EXTS, PDF_EXTS, InputError
@@ -172,14 +172,23 @@ def main(argv: List[str] | None = None) -> int:
             print(f"Không thấy file từ điển: {args.dict}", file=sys.stderr)
             return 2
         from .spellfix import get_lexicon
-        get_lexicon().load_user_dict(Path(args.dict))
+        try:
+            get_lexicon().load_user_dict(Path(args.dict))
+        except OSError as e:
+            print(f"Không đọc được file từ điển {args.dict}: {e}", file=sys.stderr)
+            return 2
     pipe = Pipeline(opts)
 
     out_dir: Path | None = None
     single_out: Path | None = None
+    merge_out: Path | None = None
     if args.output:
         op = Path(args.output)
-        if op.suffix.lower() == ".docx" and len(files) == 1 and not args.merge:
+        if op.suffix.lower() == ".docx" and not op.is_dir() and not args.merge:
+            if len(files) > 1:
+                print(f"Có {len(files)} file đầu vào: -o phải là thư mục (hoặc dùng --merge {op.name} để gộp "
+                      f"thành một file).", file=sys.stderr)
+                return 2
             single_out = op
         else:
             out_dir = op
@@ -188,7 +197,27 @@ def main(argv: List[str] | None = None) -> int:
             except OSError as e:
                 print(f"Không tạo được thư mục kết quả {out_dir}: {e}", file=sys.stderr)
                 return 2
+    if args.merge:
+        merge_out = Path(args.merge)
+        if merge_out.is_dir():  # --merge THƯ_MỤC: đặt file gộp trong thư mục đó
+            merge_out = merge_out / (files[0].stem + "_merged.docx")
+        elif merge_out.suffix.lower() != ".docx":  # "--merge tong_hop" -> tong_hop.docx (Word mới mở được)
+            merge_out = merge_out.with_name(merge_out.name + ".docx")
+    # thư mục sẽ ghi kết quả phải ghi được – kiểm tra trước, không để OCR xong cả lô mới báo lỗi
+    if merge_out is not None:
+        dests = {merge_out.parent}
+    elif single_out is not None:
+        dests = {single_out.parent}
+    else:
+        dests = {out_dir} if out_dir is not None else {f.parent for f in files}
+    for d in sorted(dests, key=str):
+        err = check_writable_dir(d)
+        if err:
+            print(err + (" Dùng -o để chọn nơi lưu." if out_dir is None and merge_out is None else ""),
+                  file=sys.stderr)
+            return 2
 
+    used: set = set()
     all_pages = []
     failed: List[Path] = []
     try:
@@ -199,9 +228,13 @@ def main(argv: List[str] | None = None) -> int:
                 if args.merge:
                     all_pages.extend(pages)
                     continue
-                target = single_out or (out_dir or f.parent) / (f.stem + ".docx")
+                planned = single_out or (out_dir or f.parent) / (f.stem + ".docx")
+                target = unique_output(planned, used)
+                if target != planned:
+                    print(f"  ! trùng tên với file khác trong lượt này – lưu thành {target.name}")
                 written = export_docx(pages, str(target), font_name=args.font,
                                       keep_line_breaks=args.keep_line_breaks)
+                remember_output(written, used)
                 if Path(written) != target:
                     print(f"  ! {target.name} đang mở/bị khoá – đã lưu thành {Path(written).name}")
                 print(f"  -> {written}")
@@ -213,11 +246,17 @@ def main(argv: List[str] | None = None) -> int:
                 log.debug("lỗi xử lý %s", f, exc_info=True)
                 print(f"  ✖ Lỗi: {describe_error(e)}", file=sys.stderr)
                 failed.append(f)
-        if args.merge and all_pages:
-            written = export_docx(all_pages, args.merge, font_name=args.font, keep_line_breaks=args.keep_line_breaks)
-            print(f"  -> {written}")
-            if args.txt:
-                print(f"  -> {write_text(all_pages, str(Path(written).with_suffix('.txt')))}")
+        if merge_out is not None and all_pages:
+            try:
+                written = export_docx(all_pages, str(merge_out), font_name=args.font,
+                                      keep_line_breaks=args.keep_line_breaks)
+                print(f"  -> {written}")
+                if args.txt:
+                    print(f"  -> {write_text(all_pages, str(Path(written).with_suffix('.txt')))}")
+            except Exception as e:  # noqa: BLE001
+                log.debug("lỗi ghi file gộp", exc_info=True)
+                print(f"  ✖ Lỗi ghi file gộp {merge_out}: {describe_error(e)}", file=sys.stderr)
+                return 1
     except (KeyboardInterrupt, Cancelled):
         print("Đã dừng.", file=sys.stderr)
         return 130

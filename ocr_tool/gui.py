@@ -16,7 +16,7 @@ from typing import List, Optional
 from . import __version__
 from .cli import describe_error
 from .config import app_dir, find_tesseract, list_languages, resolve_tessdata
-from .export_docx import export_docx, write_text
+from .export_docx import check_writable_dir, export_docx, remember_output, unique_output, write_text
 from .lang import LANG_MAP, LANG_NAMES
 from .pipeline import Cancelled, Options, Pipeline
 from .preprocess import IMAGE_EXTS, PDF_EXTS
@@ -283,11 +283,13 @@ class App(tk.Tk):
             messagebox.showerror("Thiếu Tesseract", "Không tìm thấy Tesseract. Cài đặt rồi thử lại.")
             return
         out_dir = self.out_var.get().strip() or None
-        if out_dir:
-            try:
-                Path(out_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                messagebox.showerror("Thư mục kết quả", f"Không tạo được thư mục kết quả:\n{out_dir}\n{e}")
+        # nơi lưu kết quả phải ghi được (thư mục chỉ đọc, ổ CD, thư mục hệ thống...): báo ngay, không để OCR
+        # xong cả lô mới biết không lưu được
+        dests = {Path(out_dir)} if out_dir else {Path(f).parent for f in files}
+        for d in sorted(dests, key=str):
+            err = check_writable_dir(d)
+            if err:
+                messagebox.showerror("Thư mục kết quả", err)
                 return
         opts = Options(
             langs=langs, tesseract_cmd=cmd,
@@ -314,6 +316,7 @@ class App(tk.Tk):
 
     def _work(self, files, opts, out_dir, font, keep_lines, merge, txt) -> None:
         failed = []
+        used: set = set()
         try:
             pipe = Pipeline(opts)
             all_pages = []
@@ -327,8 +330,10 @@ class App(tk.Tk):
                     if merge:
                         all_pages.extend(pages)
                     else:
-                        target = Path(out_dir) / (Path(f).stem + ".docx") if out_dir else Path(f).with_suffix(".docx")
+                        planned = Path(out_dir) / (Path(f).stem + ".docx") if out_dir else Path(f).with_suffix(".docx")
+                        target = unique_output(planned, used)  # a\scan.png + b\scan.png: không ghi đè nhau
                         written = export_docx(pages, str(target), font_name=font, keep_line_breaks=keep_lines)
+                        remember_output(written, used)
                         if Path(written) != target:
                             self._queue.put(("log", f"   ! {target.name} đang mở/bị khoá – lưu thành {Path(written).name}"))
                         if txt:

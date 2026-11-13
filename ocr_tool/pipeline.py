@@ -16,7 +16,7 @@ import numpy as np
 
 from .document import BBox, Element, Figure, Line, Page, Paragraph, Table, TableCell, Word, union_bbox
 from .engine import Block, TesseractEngine
-from .lang import choose_lang
+from .lang import choose_lang, script_profile
 from .layout import build_page
 from .preprocess import LoadedImage, count_pages, iter_inputs, preprocess
 from .figures import (CAPTION_RE, binarize_ink, crop_figure, detect_figures, detect_frames, detect_shaded_panels, merge_regions, table_is_figure,
@@ -136,7 +136,9 @@ class Pipeline:
     def _process_pdf_parallel(self, path: str, n: int, workers: int) -> List[Page]:
         """OCR các trang PDF song song (mỗi tiến trình tự dựng ảnh trang của mình)."""
         import dataclasses
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import multiprocessing
+        import shutil
+        from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
         from concurrent.futures.process import BrokenProcessPool
 
@@ -144,31 +146,53 @@ class Pipeline:
         opts = dataclasses.replace(self.opts, progress=None, page_progress=None, cancel=None, workers=1)
         results: Dict[int, Page] = {}
         self.progress(f"OCR song song {workers} tiến trình, {n} trang ...")
-        ex = ProcessPoolExecutor(max_workers=workers, initializer=_worker_init, initargs=(opts,))
+        run_tmp = _new_run_tmpdir()
+        ctx = multiprocessing.get_context()
+        stop_evt = ctx.Event()  # báo tiến trình con dừng (chúng tự dọn ảnh tạm của tesseract)
+        ex = ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_worker_init,
+                                 initargs=(opts, run_tmp, stop_evt))
+        futs: Dict = {}
         try:
             futs = {ex.submit(_worker_page, path, i): i for i in range(n)}
-            for fut in as_completed(futs):
-                i = futs[fut]
-                try:
-                    results[i] = fut.result()
-                except BrokenProcessPool:
-                    raise
-                except Exception as e:  # noqa: BLE001 - trang lỗi: làm lại tuần tự ở dưới
-                    log.warning("trang %d lỗi trong tiến trình con: %s", i + 1, e)
-                    continue
-                self.progress(f"Xong trang {len(results)}/{n} (trang {i + 1})")
-                self._page_done(len(results), n)
+            pending = set(futs)
+            while pending:
+                # chờ từng nhịp ngắn: bấm Dừng có hiệu lực ngay, không phải đợi tiến trình con OCR xong cả trang
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                 self._check_cancel()
+                for fut in done:
+                    i = futs[fut]
+                    try:
+                        results[i] = fut.result()
+                    except BrokenProcessPool:
+                        raise
+                    except Exception as e:  # noqa: BLE001 - trang lỗi: làm lại tuần tự ở dưới
+                        log.warning("trang %d lỗi trong tiến trình con: %s", i + 1, e)
+                        continue
+                    self.progress(f"Xong trang {len(results)}/{n} (trang {i + 1})")
+                    self._page_done(len(results), n)
         except BrokenProcessPool as e:
             # tiến trình con chết (thiếu bộ nhớ, bị diệt...): làm nốt các trang còn lại tuần tự
             log.warning("OCR song song gián đoạn (%s) – xử lý tiếp tuần tự", e)
             self.progress("OCR song song bị gián đoạn – xử lý tiếp từng trang ...")
         except BaseException:
-            # Dừng / Ctrl+C: diệt ngay các tiến trình con thay vì chờ chúng làm xong trang đang dở
+            # Dừng / Ctrl+C: tiến trình con dừng ngay sau lệnh tesseract đang chạy (tự xoá ảnh tạm); quá 2 giây
+            # thì diệt cả cây tiến trình (kể cả tesseract con – nếu không nó chạy mồ côi và giữ file tạm)
+            stop_evt.set()
+            for f in futs:
+                f.cancel()
+            wait([f for f in futs if f.running()], timeout=2.0)
             _kill_pool(ex)
             raise
         finally:
             ex.shutdown(wait=True, cancel_futures=True)
+            if run_tmp:
+                import time as _time
+
+                for _ in range(5):  # Windows: file vừa được tiến trình bị diệt nhả ra có thể chưa xoá được ngay
+                    shutil.rmtree(run_tmp, ignore_errors=True)
+                    if not os.path.exists(run_tmp):
+                        break
+                    _time.sleep(0.3)
         missing = [i for i in range(n) if i not in results]
         if missing:
             from .preprocess import render_pdf_page
@@ -271,7 +295,14 @@ class Pipeline:
                         return self.process_image(LoadedImage(rot, li.dpi, li.source, li.page_index),
                                                   fix_spelling=fix_spelling, _rotated=True)
                 blocks = self.engine.refine_page(gray, blocks)
-        text_h = self._median_line_height(blocks, default=max(12.0, h / 90))
+        text_h = self._median_line_height(blocks, default=0.0)
+        if not text_h or not self._median_line_height(blocks, default=0.0, good_only=True):
+            # không có dòng nào đọc tin cậy (ảnh chỉ có một bảng kẻ dày: Tesseract trả về vài "dòng" rác cao cả
+            # trăm px) -> ước lượng cỡ chữ từ vết mực, nếu không ngưỡng dò bảng sai và cả bảng thành hình
+            ink_h = _ink_text_height(gray)
+            if ink_h and (not text_h or text_h > 2.5 * ink_h):
+                text_h = ink_h
+        text_h = text_h or max(12.0, h / 90)
 
         tables: List[Table] = []
         grids: List[TableGrid] = []
@@ -294,7 +325,8 @@ class Pipeline:
             self.progress("Nhận diện hình vẽ / ảnh ...")
             tables, fig_boxes = self._find_figures(gray, blocks, tables, text_h,
                                                    extra_boxes=text_layer.image_boxes if text_layer else (),
-                                                   color=pre.color if text_layer is None else None)
+                                                   color=pre.color if text_layer is None else None,
+                                                   scale=pre.scale)
             if fig_boxes:
                 fig_boxes = self._trim_captions(blocks, fig_boxes)
                 blocks = self._remove_words_in(blocks, fig_boxes)
@@ -324,8 +356,11 @@ class Pipeline:
         return page
 
     @staticmethod
-    def _median_line_height(blocks: List[Block], default: float) -> float:
-        hs = [ln.height for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
+    def _median_line_height(blocks: List[Block], default: float, good_only: bool = False) -> float:
+        lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
+        if good_only:
+            lines = [ln for ln in lines if ln.conf >= 50 and text_quality(ln.text, ln.conf) >= 0.5]
+        hs = [ln.height for ln in lines]
         return float(median(hs)) if hs else default
 
     # ------------------------------------------------------------------ hình vẽ / ảnh
@@ -346,7 +381,7 @@ class Pipeline:
         return tl
 
     def _find_figures(self, gray: np.ndarray, blocks: List[Block], tables: List[Table], lh: float,
-                      extra_boxes: Sequence[BBox] = (), color: Optional[np.ndarray] = None):
+                      extra_boxes: Sequence[BBox] = (), color: Optional[np.ndarray] = None, scale: float = 1.0):
         h, w = gray.shape[:2]
         lines = [ln for b in blocks for p in b.paragraphs for ln in p.lines if ln.words]
         if lines:
@@ -404,7 +439,7 @@ class Pipeline:
         # hộp minh hoạ: khung viền/nền xám có sơ đồ hoặc chữ rác bên trong -> giữ nguyên cả hộp làm hình
         if color is not None:
             area = lambda b: max(1, (b[2] - b[0]) * (b[3] - b[1]))
-            shaded = detect_shaded_panels(color, lh)
+            shaded = detect_shaded_panels(color, lh, scale=scale)
             for pb in detect_frames(gray, lh) + shaded:
                 inside = [p for b in blocks for p in b.paragraphs
                           if not p.is_empty() and self._inter(p.bbox, pb) > 0.5 * area(p.bbox)]
@@ -805,7 +840,12 @@ class Pipeline:
         tables: List[Table] = []
         for gi, g in enumerate(grids):
             words = table_words[gi]
-            lang = choose_lang(" ".join(w.text for w in words), self.engine.langs) if words else self.engine.combined_lang
+            table_lang = choose_lang(" ".join(w.text for w in words), self.engine.langs) if words \
+                else self.engine.combined_lang
+            # ô ngắn / ô cả trang không đọc ra chữ (số thứ tự, số lượng...): mô hình tiếng Việt đọc "8" thành "ö",
+            # "13" thành "15". Bảng không có tiếng Nga dùng mô hình tiếng Anh (đọc số chính xác nhất); chữ có dấu
+            # vẫn được ocr_region_best đọc lại bằng mô hình tiếng Việt.
+            short_lang = "eng" if "eng" in self.engine.langs and "rus" not in table_lang.split("+") else table_lang
             tbl = Table(bbox=g.bbox, row_edges=list(g.row_edges), col_edges=list(g.col_edges),
                         from_text_layer=from_text_layer)
             self.progress(f"Đọc bảng {gi + 1}/{len(grids)} ({g.n_rows}x{g.n_cols}) ...")
@@ -815,13 +855,26 @@ class Pipeline:
                 fallback_lines = self._words_to_lines(cell_words)
                 lines: List[str] = []
                 align_words = cell_words
+                re_words: List[Word] = []
                 if self.opts.reocr_cells and not from_text_layer:
                     cell_text = " ".join(w.text for w in cell_words)
-                    cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else lang
+                    cell_lang = choose_lang(cell_text, self.engine.langs) if len(cell_text) >= 3 else short_lang
                     lines, re_words = self._ocr_cell(gray, gc.bbox, cell_lang)
+                    if len(cell_text) < 3 and set(cell_lang.split("+")) < set(self.engine.langs) and \
+                            any(ch.isalpha() for ch in " ".join(lines)):
+                        # ô có chữ mà đọc cả trang không ra (ảnh chỉ có bảng): đọc thêm bằng các mô hình người dùng
+                        # chọn, giữ bản có dấu tiếng Việt / chữ Nga ("Dat" -> "Đạt", "Ha" -> "Да")
+                        alt_lines, alt_words = self._ocr_cell(gray, gc.bbox, self.engine.combined_lang)
+                        if _prefer_reading(lines, re_words, alt_lines, alt_words):
+                            lines, re_words = alt_lines, alt_words
                     if re_words:
                         align_words = re_words
-                if not lines or (fallback_lines and len(" ".join(lines)) < 0.5 * len(" ".join(fallback_lines))):
+                # chữ đọc cả trang dài hơn hẳn chữ đọc lại ô: ô đọc lại bị sót chữ -> dùng chữ cả trang,
+                # trừ khi phần "dài hơn" chỉ là rác do đọc dính đường kẻ ("СОНИ" thay cho "8"): rác có độ
+                # tin cậy thấp hơn hẳn chữ đọc lại
+                if not lines or (fallback_lines and len(" ".join(lines)) < 0.5 * len(" ".join(fallback_lines))
+                                 and _mean_conf(cell_words) >= _mean_conf(re_words) - 10
+                                 and text_quality(" ".join(fallback_lines)) >= text_quality(" ".join(lines))):
                     lines = fallback_lines
                     align_words = cell_words
                 cell.lines = lines
@@ -839,7 +892,7 @@ class Pipeline:
         l, t, r, b = l + inset, t + inset, r - inset, b - inset
         if r - l < 8 or b - t < 8:
             return [], []
-        crop = gray[t:b, l:r]
+        crop = _peel_ruling(gray[t:b, l:r].copy())
         # ô trống -> bỏ qua để tiết kiệm thời gian
         if (crop < 128).mean() < 0.002:
             return [], []
@@ -904,6 +957,59 @@ class Pipeline:
         return elements
 
 
+def _ink_text_height(gray: np.ndarray) -> Optional[float]:
+    """Chiều cao dòng chữ ước lượng từ các vết mực cỡ ký tự – dùng khi Tesseract không đọc được dòng nào tin cậy."""
+    bw = binarize_ink(gray)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    if n < 2:
+        return None
+    hh, ww = stats[1:, cv2.CC_STAT_HEIGHT], stats[1:, cv2.CC_STAT_WIDTH]
+    ok = (hh >= 6) & (hh <= 0.1 * gray.shape[0]) & (ww <= 3 * hh)
+    if ok.sum() < 10:
+        return None
+    return float(np.median(hh[ok])) * 1.3
+
+
+def _prefer_reading(cur_lines: List[str], cur_words: Sequence[Word], alt_lines: List[str],
+                    alt_words: Sequence[Word]) -> bool:
+    if not alt_lines:
+        return False
+    pa, pb = script_profile(" ".join(cur_lines)), script_profile(" ".join(alt_lines))
+    sa, sb = pa["viet"] + pa["cyr"], pb["viet"] + pb["cyr"]
+    ca, cb = _mean_conf(cur_words), _mean_conf(alt_words)
+    return (sb > sa and cb >= ca - 10) or (sb == sa and cb > ca + 5)
+
+
+def _mean_conf(words: Sequence[Word]) -> float:
+    return sum(w.conf for w in words) / len(words) if words else 0.0
+
+
+def _peel_ruling(crop: np.ndarray) -> np.ndarray:
+    """Xoá phần đường kẻ ô còn sót ở mép vùng cắt (kẻ dày hoặc lệch vài px so với mép ô tìm được).
+    Một hàng/cột điểm ảnh gần mép mà tối gần hết bề rộng/chiều cao ô là đường kẻ, không phải chữ;
+    để lại thì Tesseract đọc "8" thành "Bo", "13" thành "TM"."""
+    h, w = crop.shape[:2]
+    if h < 4 or w < 4:
+        return crop
+    dark = crop < 128
+    band = max(3, int(0.12 * min(h, w)))
+    rows = dark.mean(axis=1)
+    cols = dark.mean(axis=0)
+    top = [y for y in range(min(band, h)) if rows[y] > 0.6]
+    bottom = [y for y in range(max(0, h - band), h) if rows[y] > 0.6]
+    left = [x for x in range(min(band, w)) if cols[x] > 0.6]
+    right = [x for x in range(max(0, w - band), w) if cols[x] > 0.6]
+    if top:
+        crop[:max(top) + 1] = 255
+    if bottom:
+        crop[min(bottom):] = 255
+    if left:
+        crop[:, :max(left) + 1] = 255
+    if right:
+        crop[:, min(right):] = 255
+    return crop
+
+
 def _kill_pool(ex) -> None:
     try:
         procs = list(getattr(ex, "_processes", {}).values())
@@ -911,9 +1017,39 @@ def _kill_pool(ex) -> None:
         procs = []
     for proc in procs:
         try:
+            if proc.is_alive():
+                _kill_tree(proc.pid)
             proc.terminate()
         except Exception:  # noqa: BLE001
             pass
+    for proc in procs:
+        try:
+            proc.join(timeout=3)  # chờ tiến trình thật sự thoát (Windows: nhả file tạm) trước khi dọn thư mục tạm
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _kill_tree(pid: int) -> None:
+    """Diệt các tiến trình con (tesseract) của một tiến trình OCR song song."""
+    import signal
+    import subprocess
+
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10,
+                       stdin=subprocess.DEVNULL, creationflags=0x08000000)
+        return
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return
+    for p in proc_dir.iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            ppid = int((p / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            if ppid == pid:
+                os.kill(int(p.name), signal.SIGKILL)
+        except (OSError, ValueError, IndexError):
+            continue
 
 
 def _looks_misoriented(blocks: List[Block]) -> bool:
@@ -930,8 +1066,38 @@ def _looks_misoriented(blocks: List[Block]) -> bool:
 _WORKER_PIPE: Optional["Pipeline"] = None
 
 
-def _worker_init(opts: Options) -> None:
+def _new_run_tmpdir() -> Optional[str]:
+    """Thư mục tạm riêng cho một lượt OCR song song. Tiến trình con bị diệt khi bấm Dừng / đóng cửa sổ không kịp
+    xoá ảnh tạm của pytesseract (tess_*_input.PNG cả trang, *.tsv): xoá cả thư mục sau lượt chạy và dọn các
+    thư mục còn sót của lần trước (file đang bị tesseract.exe mồ côi giữ trên Windows)."""
+    import shutil
+    import tempfile
+    import time
+
+    root = Path(tempfile.gettempdir()) / "ocr2word_runs"
+    try:
+        root.mkdir(exist_ok=True)
+        for old in root.iterdir():
+            try:
+                if time.time() - old.stat().st_mtime > 3600:
+                    shutil.rmtree(old, ignore_errors=True)
+            except OSError:
+                pass
+        return tempfile.mkdtemp(prefix="run_", dir=str(root))
+    except OSError:
+        return None
+
+
+def _worker_init(opts: Options, tmpdir: Optional[str] = None, stop_evt=None) -> None:
     global _WORKER_PIPE
+    if tmpdir and os.path.isdir(tmpdir):
+        import tempfile
+
+        tempfile.tempdir = tmpdir  # ảnh tạm của pytesseract nằm trong thư mục của lượt chạy
+    if stop_evt is not None:
+        import dataclasses
+
+        opts = dataclasses.replace(opts, cancel=stop_evt.is_set)
     _WORKER_PIPE = Pipeline(opts)
 
 

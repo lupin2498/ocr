@@ -98,7 +98,10 @@ class Lexicon:
                     lex.words.update(zip(sy, sy[1:]))
         for path in (DATA_DIR / "custom_dict.txt", user_dict_path(), extra_user_dict):
             if path and Path(path).is_file():
-                lex.load_user_dict(Path(path))
+                try:
+                    lex.load_user_dict(Path(path))
+                except OSError as e:  # từ điển hỏng / không đọc được: bỏ qua, không làm hỏng việc chuyển đổi
+                    log.warning("không đọc được từ điển %s: %s", path, e)
         return lex
 
     def add_word(self, w: str, count: int = 1) -> None:
@@ -120,7 +123,7 @@ class Lexicon:
 
     def load_user_dict(self, path: Path) -> None:
         """Mỗi dòng: "sai => đúng" (thay thế cố định) hoặc một từ/cụm từ cần giữ nguyên / bổ sung."""
-        for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        for raw in _read_dict_text(path).splitlines():
             line = _nfc(raw.strip())
             if not line or line.startswith("#"):
                 continue
@@ -137,18 +140,67 @@ class Lexicon:
     def count(self, w: str) -> int:
         return self.freq.get(w, 0)
 
+    def apply_replacements(self, text: str) -> str:
+        """Thay thế cố định của từ điển người dùng – chỉ thay cả từ: "ng => người" không được biến
+        "những" thành "nhữngười", "a =>" (xoá từ "a") không được xoá mọi chữ a trong văn bản."""
+        for wrong, right in self.replacements:
+            pat = _whole_word_re(wrong)
+            new = pat.sub(lambda m: right, text)
+            if new != text and not right:
+                new = re.sub(r" {2,}", " ", new).strip()
+            text = new
+        return text
+
     def pair(self, a: str, b: str) -> int:
         """Điểm cặp âm tiết liền nhau: từ ghép kiểm duyệt (3+) hoặc có trong từ điển chung (1)."""
         return self.compounds.get((a, b), 0) or (1 if (a, b) in self.words else 0)
 
 
+def _read_dict_text(path: Path) -> str:
+    """Đọc từ điển người dùng với bảng mã bất kỳ hay gặp trên Windows: UTF-8 (có/không BOM), "Unicode"
+    của Notepad (UTF-16) hoặc ANSI tiếng Việt (cp1258) – trước đây file không phải UTF-8 làm hỏng mọi lần chạy."""
+    raw = path.read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", errors="replace")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        log.warning("%s không phải UTF-8 – đọc theo bảng mã Windows tiếng Việt (cp1258)", path.name)
+        return raw.decode("cp1258", errors="replace")
+
+
+_WHOLE_RE: Dict[str, "re.Pattern[str]"] = {}
+
+
+def _whole_word_re(wrong: str) -> "re.Pattern[str]":
+    pat = _WHOLE_RE.get(wrong)
+    if pat is None:
+        pre = r"(?<!\w)" if re.match(r"\w", wrong[0]) else ""
+        post = r"(?!\w)" if re.match(r"\w", wrong[-1]) else ""
+        pat = _WHOLE_RE[wrong] = re.compile(pre + re.escape(wrong) + post)
+    return pat
+
+
 _LEXICON: Optional[Lexicon] = None
+_LEXICON_STAMP: Optional[Tuple[int, int]] = None
+
+
+def _user_dict_stamp() -> Optional[Tuple[int, int]]:
+    try:
+        st = user_dict_path().stat()
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
 
 
 def get_lexicon() -> Lexicon:
-    global _LEXICON
-    if _LEXICON is None:
+    """Từ điển dùng chung; nạp lại khi file từ điển của người dùng thay đổi (giao diện: sửa từ điển rồi chạy
+    tiếp là có hiệu lực, không phải khởi động lại chương trình)."""
+    global _LEXICON, _LEXICON_STAMP
+    stamp = _user_dict_stamp()
+    if _LEXICON is None or stamp != _LEXICON_STAMP:
         _LEXICON = Lexicon.load()
+        _LEXICON_STAMP = stamp
     return _LEXICON
 
 
@@ -530,9 +582,7 @@ class SpellFixer:
         out = " ".join(fixed)
         out = re.sub(r"(?<=[^\W\d_]{3})(?<![A-Z0-9])(\d)", lambda m: " " + m.group(1), out) \
             if has_viet_marks(out) and re.search(r"[^\W\d_]\d", out) and _viet_word_digit(out) else out
-        for wrong, right in self.lex.replacements:
-            out = out.replace(wrong, right)
-        return out
+        return self.lex.apply_replacements(out)
 
 
 _VOWELS = set("aăâeêioôơuưyàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ")

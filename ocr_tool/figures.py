@@ -219,13 +219,15 @@ _PANEL_DELTA = 10
 _PANEL_SIDE = 0.6
 
 
-def detect_shaded_panels(color: np.ndarray, lh: float, min_frac: float = 0.03) -> List[BBox]:
+def detect_shaded_panels(color: np.ndarray, lh: float, min_frac: float = 0.03, scale: float = 1.0) -> List[BBox]:
     """Khung tô nền / viền xám dày (hộp minh hoạ của sách). Bước làm phẳng nền trước OCR xoá mất
     các khung này nên dò trên ảnh gốc: đóng hình thái học (xoá nét chữ) rồi lấy vùng tối hơn giấy.
-    Trả về khung đặc (nền xám) và khung viền dày (hình chữ nhật rỗng)."""
+    Trả về khung đặc (nền xám) và khung viền dày (hình chữ nhật rỗng).
+    `scale`: ảnh đã được phóng bao nhiêu lần trước OCR – ngưỡng "viền dày" tính theo ảnh gốc, nếu không
+    đường kẻ bảng bình thường của ảnh nhỏ (bị phóng 2 lần) cũng thành "viền dày" và cả bảng bị biến thành hình."""
     g = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY) if color.ndim == 3 else color
     h, w = g.shape[:2]
-    f = 4
+    f = max(4, int(round(4 * scale)))
     small = cv2.resize(g, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
     k = 3  # ~12px ở 300dpi: rộng hơn nét chữ thường, hẹp hơn viền khung
     filled = cv2.morphologyEx(small, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
