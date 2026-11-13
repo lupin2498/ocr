@@ -84,6 +84,7 @@ jobs:
           TESSERACT_CMD: ${{ github.workspace }}\build\tesseract\tesseract.exe
         run: |
           python tools\diag_sample.py
+          python tools\diag_table.py
           python tools\diag_detail.py
           $env:OMP_THREAD_LIMIT = "1"
           python tools\diag_detail.py
